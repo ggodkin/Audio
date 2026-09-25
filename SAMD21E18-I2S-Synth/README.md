@@ -43,43 +43,36 @@ Power the MAX98357A according to the particular breakout board. Connect the spea
 
 The acceptance test is deliberately audible; no logic analyzer is required.
 
-1. Build the firmware.
-2. Flash the ATSAMD21E18A with ST-LINK/OpenOCD.
+1. Build the firmware with PlatformIO.
+2. Flash the ATSAMD21E18A with the configured SWD programmer.
 3. Power the MAX98357A and speaker.
 4. Reset the SAMD21.
 5. A continuous approximately 1 kHz tone should be heard.
 
 The waveform uses a phase accumulator rather than assuming an integer number of samples per tone cycle, so the approximately 48.387 kHz hardware sample rate still produces a 1 kHz tone.
 
+## PlatformIO
+
+This project now uses PlatformIO rather than a hand-maintained Makefile. The firmware remains bare-metal register-level I2S code; PlatformIO is only providing the build environment, SAMD21 device support, linker integration, and programming infrastructure.
+
+Build:
+
+    pio run
+
+Upload:
+
+    pio run -t upload
+
+The initial PlatformIO configuration uses the SAMD21E18A board definition and SWD upload infrastructure. We will verify the exact ST-LINK upload configuration against the programmer hardware before changing any firmware.
+
 ## Software structure
 
-The project is intentionally split so that later SAMD51, RP2040/RP2350, and ESP32 implementations can reuse the synthesizer concept without copying the MCU-specific I2S driver.
-
 - src/main.c — SAMD21 bring-up and tone streaming
-- include/audio_config.h — audio format and pin configuration
 - src/startup.c — minimal Cortex-M0+ startup/vector table
-- linker.ld — SAMD21E18A memory map
-- Makefile — arm-none-eabi-gcc build and OpenOCD programming
+- include/audio_config.h — audio format and pin configuration
+- linker.ld — memory map
+- platformio.ini — PlatformIO build/programming configuration
 
 The first implementation intentionally uses polling rather than DMA or interrupts. Once the electrical I2S link is proven, the next step is to move the same waveform generator behind a small portable audio interface and add DMA.
 
-## Building
-
-The project expects a CMSIS device package containing the SAMD21 device headers and system_samd21.c/.h.
-
-Set:
-
-    export SAMD21_CMSIS=/path/to/CMSIS/Device/ATMEL/samd21
-    export CMSIS_CORE=/path/to/CMSIS/Core/Include
-
-Then:
-
-    make
-
-The default programmer target is ST-LINK/OpenOCD:
-
-    make flash
-
-The OpenOCD configuration is deliberately not hard-coded to a particular ST-LINK adapter. Set OPENOCD_CFG for the adapter/target configuration being used.
-
-No synthesizer library, RTOS, Arduino framework, or audio codec library is used in this first milestone.
+No synthesizer library, RTOS, or audio codec library is used in this first milestone.
