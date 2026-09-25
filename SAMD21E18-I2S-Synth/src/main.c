@@ -12,11 +12,18 @@
 #define I2S_SYNC_ENABLE        (1u << 1)
 #define I2S_SYNC_CKEN0         (1u << 2)
 #define I2S_SYNC_SEREN1        (1u << 5)
+#define I2S_SYNC_DATA1         (1u << 6)
 
 #define I2S_CLKCTRL_SLOTSIZE_32   (3u << 0)
 #define I2S_CLKCTRL_NBSLOTS_2     (1u << 2)
+#define I2S_CLKCTRL_SCKSEL        (1u << 4)
 #define I2S_CLKCTRL_BITDELAY_I2S  (1u << 7)
-#define I2S_CLKCTRL_MCKDIV_15     (14u << 16)
+
+/*
+ * MCKDIV is encoded as divider-1.  A value of 30 therefore gives
+ * division by 31.
+ */
+#define I2S_CLKCTRL_MCKDIV_31     (30u << 16)
 
 #define I2S_SERCTRL_TX            (1u << 0)
 #define I2S_SERCTRL_SLOTADJ_LEFT  (1u << 7)
@@ -25,17 +32,23 @@
 
 #define I2S_INTFLAG_TXRDY1        (1u << 9)
 
-static const int32_t sine_1khz_50khz[50] = {
-         0,  134575535,  267028733,  395270728,  517279068,
-   631129608,  735026857,  827332294,  906590206,  971550649,
-  1021189158, 1054722903, 1071623039, 1071623039, 1054722903,
-  1021189158,  971550649,  906590206,  827332294,  735026857,
-   631129608,  517279068,  395270728,  267028733,  134575535,
-         0, -134575535, -267028733, -395270728, -517279068,
-  -631129608, -735026857, -827332294, -906590206, -971550649,
- -1021189158,-1054722903,-1071623039,-1071623039,-1054722903,
- -1021189158, -971550649, -906590206, -827332294, -735026857,
-  -631129608, -517279068, -395270728, -267028733, -134575535
+static const int32_t sine_64[64] = {
+           0,  105245103,  209476638,  311690799,
+   410903206,  506158392,  596538995,  681174601,
+   759250124,  830013653,  892783697,  946955746,
+   992008093, 1027506861, 1053110175, 1068571463,
+  1073741823, 1068571463, 1053110175, 1027506861,
+   992008093,  946955746,  892783697,  830013653,
+   759250124,  681174601,  596538995,  506158392,
+   410903206,  311690799,  209476638,  105245103,
+           0, -105245103, -209476638, -311690799,
+  -410903206, -506158392, -596538995, -681174601,
+  -759250124, -830013653, -892783697, -946955746,
+  -992008093,-1027506861,-1053110175,-1068571463,
+ -1073741823,-1068571463,-1053110175,-1027506861,
+  -992008093, -946955746, -892783697, -830013653,
+  -759250124, -681174601, -596538995, -506158392,
+  -410903206, -311690799, -209476638, -105245103
 };
 
 static void wait_gclk_sync(void)
@@ -68,7 +81,10 @@ static void configure_i2s_pins(void)
 
 static void configure_i2s_clock(void)
 {
-    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(0u);
+    /*
+     * GCLK3 = DFLL48M / 1 = 48 MHz.
+     */
+    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(1u);
     wait_gclk_sync();
 
     GCLK->GENCTRL.reg =
@@ -96,11 +112,20 @@ static void configure_i2s(void)
     I2S->CTRLA.bit.SWRST = 1;
     wait_i2s_sync(1u);
 
+    /*
+     * Internal SCK generation, 32-bit stereo slots, Philips I2S
+     * one-bit data delay, divide the 48 MHz I2S clock by 31.
+     *
+     * Result:
+     *   LRCLK = 48,000,000 / 31 / 32 = 48,387.096 Hz
+     *   BCLK  = LRCLK * 64 = 3.096774 MHz
+     */
     I2S->CLKCTRL[0].reg =
         I2S_CLKCTRL_SLOTSIZE_32 |
         I2S_CLKCTRL_NBSLOTS_2 |
+        I2S_CLKCTRL_SCKSEL |
         I2S_CLKCTRL_BITDELAY_I2S |
-        I2S_CLKCTRL_MCKDIV_15;
+        I2S_CLKCTRL_MCKDIV_31;
 
     I2S->SERCTRL[1].reg =
         I2S_SERCTRL_TX |
@@ -119,23 +144,31 @@ static void configure_i2s(void)
 static void audio_write_sample(int32_t sample)
 {
     while ((I2S->INTFLAG.reg & I2S_INTFLAG_TXRDY1) == 0u) {}
+    while (I2S->SYNCBUSY.reg & I2S_SYNC_DATA1) {}
     I2S->DATA[1].reg = (uint32_t)sample;
 
     while ((I2S->INTFLAG.reg & I2S_INTFLAG_TXRDY1) == 0u) {}
+    while (I2S->SYNCBUSY.reg & I2S_SYNC_DATA1) {}
     I2S->DATA[1].reg = (uint32_t)sample;
 }
 
 int main(void)
 {
-    uint32_t index = 0;
+    uint32_t phase = 0;
+
+    /*
+     * Numerically controlled oscillator.  The hardware sample rate is
+     * 48 MHz / (31 * 32), so this produces approximately 1.000 kHz.
+     */
+    const uint32_t phase_increment =
+        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL *
+                    AUDIO_I2S_DIVISION * AUDIO_SLOT_BITS) / 48000000ULL);
 
     configure_i2s();
 
     for (;;) {
-        audio_write_sample(sine_1khz_50khz[index]);
-        index++;
-        if (index >= 50u) {
-            index = 0;
-        }
+        const uint32_t table_index = phase >> 26;
+        audio_write_sample(sine_64[table_index]);
+        phase += phase_increment;
     }
 }
