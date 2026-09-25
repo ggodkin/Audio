@@ -152,7 +152,7 @@ static void audio_write_sample(int32_t sample)
     I2S->DATA[1].reg = (uint32_t)sample;
 }
 
-int main(void)
+void setup(void)
 {
     uint32_t phase = 0;
 
@@ -165,8 +165,10 @@ int main(void)
                     AUDIO_I2S_DIVISION * AUDIO_SLOT_BITS) / 48000000ULL);
 
     configure_i2s();
+}
 
-    for (;;) {
+void loop(void)
+{
         const uint32_t table_index = phase >> 26;
         audio_write_sample(sine_64[table_index]);
         phase += phase_increment;
