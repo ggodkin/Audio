@@ -1,19 +1,11 @@
 /*
- * ATSAMD21E18A → MAX98357A  – diagnostic build
+ * ATSAMD21E18A → MAX98357A
+ * Continuous 440 Hz sine over I2S
  *
  * PA08 = DIN (SD1), PA10 = BCLK (SCK0), PA11 = LRCLK (FS0), PA17 = LED
  *
- * LED codes:
- *   3 fast blinks at start of setup()
- *   then 1 blink = APB clock enabled
- *   then 2 blinks = GCLK routed
- *   then 3 blinks = pins muxed
- *   then 4 blinks = I2S reset done
- *   then 5 blinks = CLKCTRL/SERCTRL written
- *   then 6 blinks = I2S enabled
- *   then slow 1 Hz toggle = main loop running (samples being written)
- *
- * If it stops at a particular count, that is where it was hanging before.
+ * Bug fixed: SEREN1 is bit 5 of CTRLA (was wrongly written as bit 6).
+ * That left the serializer disabled → TXRDY1 never asserted → no clocks.
  */
 
 #include <Arduino.h>
@@ -46,7 +38,7 @@ static uint32_t phase = 0;
 static uint32_t phase_inc = 0;
 
 // ---------------------------------------------------------------------------
-// LED helpers (PA17, active high)
+// LED (PA17, active high)
 // ---------------------------------------------------------------------------
 static void led_init(void)
 {
@@ -54,11 +46,11 @@ static void led_init(void)
     PORT->Group[0].OUTCLR.reg = PORT_PA17;
 }
 
-static void led_on(void)  { PORT->Group[0].OUTSET.reg = PORT_PA17; }
-static void led_off(void) { PORT->Group[0].OUTCLR.reg = PORT_PA17; }
+static void led_on(void)     { PORT->Group[0].OUTSET.reg = PORT_PA17; }
+static void led_off(void)    { PORT->Group[0].OUTCLR.reg = PORT_PA17; }
 static void led_toggle(void) { PORT->Group[0].OUTTGL.reg = PORT_PA17; }
 
-static void led_blink_n(int n, uint16_t on_ms = 120, uint16_t off_ms = 120)
+static void led_blink_n(int n, uint16_t on_ms = 100, uint16_t off_ms = 100)
 {
     for (int i = 0; i < n; i++) {
         led_on();
@@ -66,114 +58,101 @@ static void led_blink_n(int n, uint16_t on_ms = 120, uint16_t off_ms = 120)
         led_off();
         delay(off_ms);
     }
-    delay(300);
+    delay(250);
 }
 
-// Timed waits – never hang forever
-static void wait_gclk_sync_timeout(void)
+static void wait_gclk(void)
 {
-    for (uint32_t i = 0; i < 100000u; i++) {
-        if (!GCLK->STATUS.bit.SYNCBUSY) return;
-    }
+    for (uint32_t i = 0; i < 100000u && GCLK->STATUS.bit.SYNCBUSY; i++) {}
 }
 
-static void wait_i2s_sync_timeout(uint32_t mask)
+static void wait_i2s(uint32_t mask)
 {
-    for (uint32_t i = 0; i < 100000u; i++) {
-        if ((I2S->SYNCBUSY.reg & mask) == 0) return;
-    }
+    for (uint32_t i = 0; i < 100000u && (I2S->SYNCBUSY.reg & mask); i++) {}
 }
 
-// ---------------------------------------------------------------------------
-// Step-by-step I2S bring-up with LED progress codes
 // ---------------------------------------------------------------------------
 static void configure_i2s(void)
 {
-    // 1. Enable APB clock for I2S
+    // 1. APB clock
     PM->APBCMASK.reg |= PM_APBCMASK_I2S;
     led_blink_n(1);
 
-    // 2. Route GCLK0 (48 MHz) to I2S
-    //    GCLK ID for I2S clock unit 0 on SAMD21 = 0x18
-    GCLK->CLKCTRL.reg = (uint16_t)(
-        (0x18u << 0) |          // ID
-        (0u << 8) |             // GEN = GCLK0
-        (1u << 14)              // CLKEN
-    );
-    wait_gclk_sync_timeout();
+    // 2. GCLK0 (48 MHz) → I2S (GCLK ID 0x18)
+    GCLK->CLKCTRL.reg =
+        GCLK_CLKCTRL_ID(0x18) |
+        GCLK_CLKCTRL_GEN_GCLK0 |
+        GCLK_CLKCTRL_CLKEN;
+    wait_gclk();
     led_blink_n(2);
 
     // 3. Pinmux function G (6)
-    // PA08 = SD1 (even → PMUXE of PMUX[4])
+    // PA08 = SD1
     PORT->Group[0].PINCFG[8].reg  |= PORT_PINCFG_PMUXEN;
-    PORT->Group[0].PMUX[4].reg    = (PORT->Group[0].PMUX[4].reg & 0xF0) | 0x06;
+    PORT->Group[0].PMUX[4].bit.PMUXE = 0x6;
 
-    // PA10 = SCK0 (even → PMUXE of PMUX[5])
+    // PA10 = SCK0
     PORT->Group[0].PINCFG[10].reg |= PORT_PINCFG_PMUXEN;
-    PORT->Group[0].PMUX[5].reg    = (PORT->Group[0].PMUX[5].reg & 0xF0) | 0x06;
+    PORT->Group[0].PMUX[5].bit.PMUXE = 0x6;
 
-    // PA11 = FS0  (odd  → PMUXO of PMUX[5])
+    // PA11 = FS0
     PORT->Group[0].PINCFG[11].reg |= PORT_PINCFG_PMUXEN;
-    PORT->Group[0].PMUX[5].reg    = (PORT->Group[0].PMUX[5].reg & 0x0F) | 0x60;
+    PORT->Group[0].PMUX[5].bit.PMUXO = 0x6;
     led_blink_n(3);
 
-    // 4. Software reset of I2S
-    I2S->CTRLA.reg = (1u << 0);                 // SWRST
-    wait_i2s_sync_timeout(1u << 0);
+    // 4. Software reset
+    I2S->CTRLA.reg = I2S_CTRLA_SWRST;
+    wait_i2s(I2S_SYNCBUSY_SWRST);
     led_blink_n(4);
 
-    // 5. Clock unit 0 + Serializer 1 configuration (raw values)
-    // CLKCTRL[0]:
-    //   SLOTSIZE=3 (32bit), NBSLOTS=1 (2 slots), BITDELAY=1,
-    //   FSSEL=0 (SCKDIV), SCKSEL=1 (MCKDIV), MCKSEL=0 (GCLK),
-    //   MCKDIV=15 → 48MHz/16 = 3 MHz BCLK → 46.875 kHz LRCLK
+    // 5. Clock unit 0 + Serializer 1
+    // 32-bit slots, 2 slots, I2S format (BITDELAY),
+    // FS from SCK, SCK from MCK, MCK = GCLK, MCKDIV=15 → 3 MHz BCLK
     I2S->CLKCTRL[0].reg =
-        (3u << 0)  |   // SLOTSIZE
-        (1u << 2)  |   // NBSLOTS
-        (1u << 7)  |   // BITDELAY
-        (0u << 8)  |   // FSSEL = SCKDIV
-        (1u << 12) |   // SCKSEL = MCKDIV
-        (0u << 16) |   // MCKSEL = GCLK
-        (15u << 19);   // MCKDIV
+        I2S_CLKCTRL_SLOTSIZE(3) |      // 32-bit
+        I2S_CLKCTRL_NBSLOTS(1) |       // 2 slots
+        I2S_CLKCTRL_BITDELAY |
+        I2S_CLKCTRL_FSSEL_SCKDIV |
+        I2S_CLKCTRL_SCKSEL_MCKDIV |
+        I2S_CLKCTRL_MCKSEL_GCLK |
+        I2S_CLKCTRL_MCKDIV(15);
 
-    // SERCTRL[1] – TX on serializer 1 (PA08 = SD1)
-    // SERMODE=1 (TX), SLOTADJ=1 (left), DATASIZE=0 (32bit), CLKSEL=0 (CLK0)
+    // Serializer 1 = TX, left-aligned, 32-bit, clock unit 0
     I2S->SERCTRL[1].reg =
-        (1u << 0)  |   // SERMODE = TX
-        (1u << 7)  |   // SLOTADJ = LEFT
-        (0u << 8)  |   // DATASIZE = 32
-        (0u << 5);     // CLKSEL = CLK0
+        I2S_SERCTRL_SERMODE_TX |
+        I2S_SERCTRL_TXSAME |
+        I2S_SERCTRL_SLOTADJ_LEFT |
+        I2S_SERCTRL_DATASIZE_32 |
+        I2S_SERCTRL_CLKSEL_CLK0;
 
     led_blink_n(5);
 
-    // 6. Enable peripheral + clock unit 0 + serializer 1
+    // 6. Enable – SEREN1 is bit 5 (NOT bit 6)
     I2S->CTRLA.reg =
-        (1u << 1) |    // ENABLE
-        (1u << 2) |    // CKEN0
-        (1u << 6);     // SEREN1
+        I2S_CTRLA_ENABLE |
+        I2S_CTRLA_CKEN0  |
+        I2S_CTRLA_SEREN1;              // bit 5
 
-    wait_i2s_sync_timeout(
-        (1u << 1) |    // ENABLE
-        (1u << 2) |    // CKEN0
-        (1u << 6));    // SEREN1
+    wait_i2s(I2S_SYNCBUSY_ENABLE |
+             I2S_SYNCBUSY_CKEN0  |
+             I2S_SYNCBUSY_SEREN1);
 
     led_blink_n(6);
 }
 
-// Non-blocking-ish write (with short timeout so LED still lives if I2S is dead)
 static bool i2s_write_stereo(int32_t sample)
 {
     uint32_t t;
 
     t = 0;
-    while (!(I2S->INTFLAG.reg & (1u << 9))) {   // TXRDY1
-        if (++t > 50000u) return false;
+    while (!(I2S->INTFLAG.bit.TXRDY1)) {
+        if (++t > 100000u) return false;
     }
     I2S->DATA[1].reg = (uint32_t)sample;
 
     t = 0;
-    while (!(I2S->INTFLAG.reg & (1u << 9))) {
-        if (++t > 50000u) return false;
+    while (!(I2S->INTFLAG.bit.TXRDY1)) {
+        if (++t > 100000u) return false;
     }
     I2S->DATA[1].reg = (uint32_t)sample;
 
@@ -185,16 +164,15 @@ void setup()
 {
     led_init();
 
-    // 3 rapid blinks = we reached setup()
-    led_blink_n(3, 60, 60);
+    // 3 fast blinks = reached setup()
+    led_blink_n(3, 50, 50);
 
     phase_inc = (uint32_t)(((uint64_t)TONE_HZ << 32) / SAMPLE_RATE_HZ);
 
     configure_i2s();
 
-    // If we get here, init finished – solid on for a moment
     led_on();
-    delay(500);
+    delay(400);
 }
 
 void loop()
@@ -206,16 +184,14 @@ void loop()
     int32_t sample = sine_table[idx & (SINE_LEN - 1)];
 
     if (!i2s_write_stereo(sample)) {
-        // I2S never became ready – flash SOS-style and keep trying
         i2s_ok = false;
-        led_blink_n(10, 40, 40);
+        led_blink_n(10, 40, 40);   // SOS – TX never ready
     }
 
     phase += phase_inc;
 
-    // Slow heartbeat only when I2S writes succeed
     if (i2s_ok && ++sample_count >= (SAMPLE_RATE_HZ / 2)) {
         sample_count = 0;
-        led_toggle();
+        led_toggle();              // ~1 Hz heartbeat when audio is flowing
     }
 }
