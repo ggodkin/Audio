@@ -13,7 +13,12 @@
 #define AUDIO_CLKCTRL_SLOTSIZE_32   (3u << 0)
 #define AUDIO_CLKCTRL_NBSLOTS_2     (1u << 2)
 #define AUDIO_CLKCTRL_BITDELAY_I2S  (1u << 7)
-#define AUDIO_CLKCTRL_MCKDIV_31     (30u << 16)
+#define AUDIO_CLKCTRL_FSSEL_SCKDIV  (0u << 8)
+#define AUDIO_CLKCTRL_SCKSEL_MCKDIV (1u << 12)
+#define AUDIO_CLKCTRL_MCKSEL_GCLK   (0u << 16)
+#define AUDIO_CLKCTRL_MCKEN         (1u << 18)
+#define AUDIO_CLKCTRL_MCKDIV_4      (3u << 19)
+#define AUDIO_CLKCTRL_MCKOUTDIV_2   (1u << 24)
 #define AUDIO_SERCTRL_TX            (1u << 0)
 #define AUDIO_SERCTRL_SLOTADJ_LEFT  (1u << 7)
 #define AUDIO_SERCTRL_DATASIZE_32   (0u << 8)
@@ -104,18 +109,24 @@ static void configure_i2s(void)
     wait_i2s_sync(1u);
 
     /*
-     * Internal SCK generation, 2 x 32-bit stereo slots, Philips I2S
-     * one-bit data delay, divide the 48 MHz I2S clock by 31.
+     * Internal clock generation using the SAMD21 clock chain:
+     *   GCLK = 24 MHz
+     *   MCK  = GCLK / 2 = 12 MHz
+     *   SCK  = MCK / 4 = 3 MHz
+     *   FS   = SCK / 64 = 46,875 Hz
      *
-     * Result:
-     *   LRCLK = 48,000,000 / 31 / 32 = 48,387.096 Hz
-     *   BCLK  = LRCLK * 64 = 3.096774 MHz
+     * This is the nearest simple integer-divider configuration to 48 kHz.
      */
     I2S->CLKCTRL[0].reg =
         AUDIO_CLKCTRL_SLOTSIZE_32 |
         AUDIO_CLKCTRL_NBSLOTS_2 |
         AUDIO_CLKCTRL_BITDELAY_I2S |
-        AUDIO_CLKCTRL_MCKDIV_31;
+        AUDIO_CLKCTRL_FSSEL_SCKDIV |
+        AUDIO_CLKCTRL_SCKSEL_MCKDIV |
+        AUDIO_CLKCTRL_MCKSEL_GCLK |
+        AUDIO_CLKCTRL_MCKEN |
+        AUDIO_CLKCTRL_MCKDIV_4 |
+        AUDIO_CLKCTRL_MCKOUTDIV_2;
 
     I2S->SERCTRL[1].reg =
         AUDIO_SERCTRL_TX |
@@ -145,8 +156,8 @@ static void audio_write_sample(int32_t sample)
 void setup(void)
 {
     /*
-     * Numerically controlled oscillator.  The hardware sample rate is
-     * 48 MHz / (31 * 32), so this produces approximately 1.000 kHz.
+     * Numerically controlled oscillator. The hardware sample rate is
+     * 46,875 Hz, so this produces approximately 1.000 kHz.
      */
     phase_increment =
         (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL *
