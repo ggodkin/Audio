@@ -2,28 +2,26 @@
 #include "sam.h"
 #include "audio_config.h"
 
-#define AUDIO_APB_CLOCK_BIT      (1u << 20)
-#define AUDIO_CTRLA_ENABLE       (1u << 1)
-#define AUDIO_CTRLA_CKEN0        (1u << 2)
-#define AUDIO_CTRLA_SEREN1       (1u << 5)
-#define AUDIO_SYNC_ENABLE        (1u << 1)
-#define AUDIO_SYNC_CKEN0         (1u << 2)
-#define AUDIO_SYNC_SEREN1        (1u << 5)
-#define AUDIO_SYNC_DATA1         (1u << 6)
+#define AUDIO_APB_CLOCK_BIT         (1u << 20)
+#define AUDIO_CTRLA_ENABLE          (1u << 1)
+#define AUDIO_CTRLA_CKEN0           (1u << 2)
+#define AUDIO_CTRLA_SEREN1          (1u << 5)
+#define AUDIO_SYNC_ENABLE           (1u << 1)
+#define AUDIO_SYNC_CKEN0            (1u << 2)
+#define AUDIO_SYNC_SEREN1           (1u << 5)
+#define AUDIO_SYNC_DATA1            (1u << 6)
 #define AUDIO_CLKCTRL_SLOTSIZE_32   (3u << 0)
 #define AUDIO_CLKCTRL_NBSLOTS_2     (1u << 2)
 #define AUDIO_CLKCTRL_BITDELAY_I2S  (1u << 7)
 #define AUDIO_CLKCTRL_FSSEL_SCKDIV  (0u << 8)
 #define AUDIO_CLKCTRL_SCKSEL_MCKDIV (1u << 12)
 #define AUDIO_CLKCTRL_MCKSEL_GCLK   (0u << 16)
-#define AUDIO_CLKCTRL_MCKEN         (1u << 18)
-#define AUDIO_CLKCTRL_MCKDIV_8      (7u << 19)
-#define AUDIO_CLKCTRL_MCKOUTDIV_2   (1u << 24)
-#define AUDIO_SERCTRL_TX            (1u << 0)
-#define AUDIO_SERCTRL_SLOTADJ_LEFT  (1u << 7)
-#define AUDIO_SERCTRL_DATASIZE_32   (0u << 8)
-#define AUDIO_SERCTRL_CLKSEL_CLK0   (0u << 5)
-#define AUDIO_INTFLAG_TXRDY1        (1u << 9)
+#define AUDIO_CLKCTRL_MCKDIV_16     (15u << 19)
+#define AUDIO_SERCTRL_TX             (1u << 0)
+#define AUDIO_SERCTRL_SLOTADJ_LEFT   (1u << 7)
+#define AUDIO_SERCTRL_DATASIZE_32    (0u << 8)
+#define AUDIO_SERCTRL_CLKSEL_CLK0    (0u << 5)
+#define AUDIO_INTFLAG_TXRDY1         (1u << 9)
 
 static const int32_t sine_64[64] = {
            0,  105245103,  209476638,  311690799,
@@ -78,9 +76,19 @@ static void configure_i2s_pins(void)
 static void configure_i2s_clock(void)
 {
     /*
-     * GCLK3 = DFLL48M / 2 = 24 MHz.
+     * GCLK3 = DFLL48M = 48 MHz.
+     *
+     * The I2S clock unit then generates:
+     *   SCK   = 48 MHz / (MCKDIV + 1)
+     *         = 48 MHz / 16
+     *         = 3 MHz
+     *   FS    = 3 MHz / (2 slots * 32 bits)
+     *         = 46.875 kHz
+     *
+     * MCK output is not enabled because the MAX98357A does not
+     * require an external MCLK signal.
      */
-    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(2u);
+    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(1u);
     wait_gclk_sync();
 
     GCLK->GENCTRL.reg =
@@ -108,15 +116,6 @@ static void configure_i2s(void)
     I2S->CTRLA.bit.SWRST = 1;
     wait_i2s_sync(1u);
 
-    /*
-     * Internal clock generation using the SAMD21 clock chain:
-     *   GCLK = 24 MHz
-     *   MCK  = GCLK / 2 = 12 MHz
-       *   SCK  = GCLK / 8 = 3 MHz
-     *   FS   = SCK / 64 = 46,875 Hz
-     *
-     * This is the nearest simple integer-divider configuration to 48 kHz.
-     */
     I2S->CLKCTRL[0].reg =
         AUDIO_CLKCTRL_SLOTSIZE_32 |
         AUDIO_CLKCTRL_NBSLOTS_2 |
@@ -124,9 +123,7 @@ static void configure_i2s(void)
         AUDIO_CLKCTRL_FSSEL_SCKDIV |
         AUDIO_CLKCTRL_SCKSEL_MCKDIV |
         AUDIO_CLKCTRL_MCKSEL_GCLK |
-        AUDIO_CLKCTRL_MCKEN |
-        AUDIO_CLKCTRL_MCKDIV_8 |
-        AUDIO_CLKCTRL_MCKOUTDIV_2;
+        AUDIO_CLKCTRL_MCKDIV_16;
 
     I2S->SERCTRL[1].reg =
         AUDIO_SERCTRL_TX |
@@ -156,12 +153,14 @@ static void audio_write_sample(int32_t sample)
 void setup(void)
 {
     /*
-     * Numerically controlled oscillator. The hardware sample rate is
-     * 46,875 Hz, so this produces approximately 1.000 kHz.
+     * Numerically controlled oscillator. The actual hardware
+     * sample rate is 46,875 Hz, so this produces approximately
+     * a 1 kHz tone.
      */
     phase_increment =
-        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) /
-                    46875ULL);
+        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) *
+                   AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN /
+                   AUDIO_ACTUAL_SAMPLE_RATE_HZ_NUM);
 
     configure_i2s();
 }
