@@ -37,6 +37,11 @@ static uint32_t phase_increment;
 
 void setup()
 {
+    // Diagnostic status output: PA27 is not used by the I2S interface.
+    // HIGH = I2S.begin() succeeded; blinking = I2S.begin() failed.
+    pinMode(27, OUTPUT);
+    digitalWrite(27, LOW);
+
     /*
      * Arduino's SAMD I2S library requests:
      *   BCLK = sampleRate * 2 * bitsPerSample
@@ -45,10 +50,18 @@ void setup()
      * divider gives 3 MHz BCLK and 46.875 kHz LRCLK.
      */
     if (!I2S.begin(I2S_PHILIPS_MODE, AUDIO_SAMPLE_RATE_HZ, AUDIO_SLOT_BITS)) {
+        // I2S.begin() allocates DMA before configuring the I2S clock.
+        // If DMA allocation fails, no BCLK/LRCLK will be generated.
         while (true) {
-            delay(1000);
+            digitalWrite(27, HIGH);
+            delay(150);
+            digitalWrite(27, LOW);
+            delay(150);
         }
     }
+
+    // Keep the diagnostic pin HIGH so we know setup reached this point.
+    digitalWrite(27, HIGH);
 
     phase_increment =
         (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) /
