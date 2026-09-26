@@ -16,15 +16,21 @@
 #define AUDIO_I2S_PIN_MUX           6u
 
 /*
- * With the SAMD21 DFLL at 48 MHz, the nearest integer I2S clock
- * division for 48 kHz / 32-bit stereo is 31:
+ * The SAMD21 DFLL provides 48 MHz. With two 32-bit I2S slots,
+ * an exact 48 kHz frame rate would require a 3.072 MHz SCK,
+ * which cannot be obtained from the 48 MHz DFLL using the
+ * SAMD21's integer MCKDIV divider.
  *
- *   48 MHz / 31 / 32 = 48,387.096 Hz
+ * Use the exact integer-divider clock instead:
  *
- * The MAX98357A accepts this LRCLK frequency (its 30.4-50.4 kHz
- * range includes it). BCLK is 3.096774 MHz, which is 64x LRCLK.
+ *   GCLK_I2S0 = 48 MHz
+ *   SCK       = 48 MHz / (15 + 1) = 3 MHz
+ *   LRCLK     = 3 MHz / (2 * 32) = 46.875 kHz
+ *
+ * The MAX98357A specifies LRCLK operation from 30.4 kHz to
+ * 50.4 kHz for this audio mode, so 46.875 kHz is valid.
  */
 #define AUDIO_ACTUAL_SAMPLE_RATE_HZ_NUM 46875u
-#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN 1u
+#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN     1u
 
 #endif
