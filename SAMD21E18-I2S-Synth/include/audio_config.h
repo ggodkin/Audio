@@ -24,8 +24,7 @@
  * The MAX98357A accepts this LRCLK frequency (its 30.4-50.4 kHz
  * range includes it). BCLK is 3.096774 MHz, which is 64x LRCLK.
  */
-#define AUDIO_I2S_DIVISION          31u
-#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_NUM 48000000u
-#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN (AUDIO_I2S_DIVISION * AUDIO_SLOT_BITS)
+#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_NUM 46875u
+#define AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN 1u
 
 #endif
