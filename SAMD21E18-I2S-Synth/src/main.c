@@ -12,7 +12,6 @@
 #define AUDIO_SYNC_DATA1         (1u << 6)
 #define AUDIO_CLKCTRL_SLOTSIZE_32   (3u << 0)
 #define AUDIO_CLKCTRL_NBSLOTS_2     (1u << 2)
-#define AUDIO_CLKCTRL_SCKSEL        (1u << 4)
 #define AUDIO_CLKCTRL_BITDELAY_I2S  (1u << 7)
 #define AUDIO_CLKCTRL_MCKDIV_31     (30u << 16)
 #define AUDIO_SERCTRL_TX            (1u << 0)
@@ -105,7 +104,7 @@ static void configure_i2s(void)
     wait_i2s_sync(1u);
 
     /*
-     * Internal SCK generation, 32-bit stereo slots, Philips I2S
+     * Internal SCK generation, 2 x 32-bit stereo slots, Philips I2S
      * one-bit data delay, divide the 48 MHz I2S clock by 31.
      *
      * Result:
@@ -115,7 +114,6 @@ static void configure_i2s(void)
     I2S->CLKCTRL[0].reg =
         AUDIO_CLKCTRL_SLOTSIZE_32 |
         AUDIO_CLKCTRL_NBSLOTS_2 |
-        AUDIO_CLKCTRL_SCKSEL |
         AUDIO_CLKCTRL_BITDELAY_I2S |
         AUDIO_CLKCTRL_MCKDIV_31;
 
