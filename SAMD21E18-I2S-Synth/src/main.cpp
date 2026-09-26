@@ -37,10 +37,11 @@ static uint32_t phase_increment;
 
 void setup()
 {
-    // Diagnostic status output: PA27 is not used by the I2S interface.
+    // Diagnostic status output: onboard LED is connected to PA17.
+    // Drive the port directly so this test is independent of Arduino pin mapping.
     // HIGH = I2S.begin() succeeded; blinking = I2S.begin() failed.
-    pinMode(27, OUTPUT);
-    digitalWrite(27, LOW);
+    PORT->Group[0].DIRSET.reg = PORT_PA17;
+    PORT->Group[0].OUTCLR.reg = PORT_PA17;
 
     /*
      * Arduino's SAMD I2S library requests:
@@ -53,15 +54,15 @@ void setup()
         // I2S.begin() allocates DMA before configuring the I2S clock.
         // If DMA allocation fails, no BCLK/LRCLK will be generated.
         while (true) {
-            digitalWrite(27, HIGH);
+            PORT->Group[0].OUTSET.reg = PORT_PA17;
             delay(150);
-            digitalWrite(27, LOW);
+            PORT->Group[0].OUTCLR.reg = PORT_PA17;
             delay(150);
         }
     }
 
     // Keep the diagnostic pin HIGH so we know setup reached this point.
-    digitalWrite(27, HIGH);
+    PORT->Group[0].OUTSET.reg = PORT_PA17;
 
     phase_increment =
         (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) /
