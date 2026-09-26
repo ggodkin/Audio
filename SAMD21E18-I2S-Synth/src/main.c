@@ -5,11 +5,11 @@
 #define AUDIO_APB_CLOCK_BIT         (1u << 20)
 #define AUDIO_CTRLA_ENABLE          (1u << 1)
 #define AUDIO_CTRLA_CKEN0           (1u << 2)
-#define AUDIO_CTRLA_SEREN1          (1u << 5)
+#define AUDIO_CTRLA_SEREN0          (1u << 5)
 #define AUDIO_SYNC_ENABLE           (1u << 1)
 #define AUDIO_SYNC_CKEN0            (1u << 2)
-#define AUDIO_SYNC_SEREN1           (1u << 5)
-#define AUDIO_SYNC_DATA1            (1u << 6)
+#define AUDIO_SYNC_SEREN0           (1u << 5)
+#define AUDIO_SYNC_DATA0            (1u << 6)
 #define AUDIO_CLKCTRL_SLOTSIZE_32   (3u << 0)
 #define AUDIO_CLKCTRL_NBSLOTS_2     (1u << 2)
 #define AUDIO_CLKCTRL_BITDELAY_I2S  (1u << 7)
@@ -21,7 +21,7 @@
 #define AUDIO_SERCTRL_SLOTADJ_LEFT   (1u << 7)
 #define AUDIO_SERCTRL_DATASIZE_32    (0u << 8)
 #define AUDIO_SERCTRL_CLKSEL_CLK0    (0u << 5)
-#define AUDIO_INTFLAG_TXRDY1         (1u << 9)
+#define AUDIO_INTFLAG_TXRDY0         (1u << 9)
 
 static const int32_t sine_64[64] = {
            0,  105245103,  209476638,  311690799,
@@ -57,20 +57,20 @@ static uint32_t phase_increment;
 
 static void configure_i2s_pins(void)
 {
-    PORT->Group[0].PINCFG[AUDIO_PIN_SD1].bit.PMUXEN = 1;
-    PORT->Group[0].PMUX[AUDIO_PIN_SD1 / 2].reg =
-        (PORT->Group[0].PMUX[AUDIO_PIN_SD1 / 2].reg & 0xF0u) |
-        AUDIO_I2S_PIN_MUX;
+    PORT->Group[0].PINCFG[AUDIO_PIN_SD0].bit.PMUXEN = 1;
+    PORT->Group[0].PMUX[AUDIO_PIN_SD0 / 2].reg =
+        (PORT->Group[0].PMUX[AUDIO_PIN_SD0 / 2].reg & 0x0Fu) |
+        (AUDIO_I2S_PIN_MUX << 4);
 
     PORT->Group[0].PINCFG[AUDIO_PIN_SCK0].bit.PMUXEN = 1;
     PORT->Group[0].PMUX[AUDIO_PIN_SCK0 / 2].reg =
-        (PORT->Group[0].PMUX[AUDIO_PIN_SCK0 / 2].reg & 0xF0u) |
-        AUDIO_I2S_PIN_MUX;
+        (PORT->Group[0].PMUX[AUDIO_PIN_SCK0 / 2].reg & 0x0Fu) |
+        (AUDIO_I2S_PIN_MUX << 4);
 
     PORT->Group[0].PINCFG[AUDIO_PIN_FS0].bit.PMUXEN = 1;
     PORT->Group[0].PMUX[AUDIO_PIN_FS0 / 2].reg =
-        (PORT->Group[0].PMUX[AUDIO_PIN_FS0 / 2].reg & 0x0Fu) |
-        (AUDIO_I2S_PIN_MUX << 4);
+        (PORT->Group[0].PMUX[AUDIO_PIN_FS0 / 2].reg & 0xF0u) |
+        AUDIO_I2S_PIN_MUX;
 }
 
 static void configure_i2s_clock(void)
@@ -125,7 +125,7 @@ static void configure_i2s(void)
         AUDIO_CLKCTRL_MCKSEL_GCLK |
         AUDIO_CLKCTRL_MCKDIV_16;
 
-    I2S->SERCTRL[1].reg =
+    I2S->SERCTRL[0].reg =
         AUDIO_SERCTRL_TX |
         AUDIO_SERCTRL_SLOTADJ_LEFT |
         AUDIO_SERCTRL_DATASIZE_32 |
@@ -134,20 +134,20 @@ static void configure_i2s(void)
     I2S->CTRLA.reg =
         AUDIO_CTRLA_ENABLE |
         AUDIO_CTRLA_CKEN0 |
-        AUDIO_CTRLA_SEREN1;
+        AUDIO_CTRLA_SEREN0;
 
-    wait_i2s_sync(AUDIO_SYNC_ENABLE | AUDIO_SYNC_CKEN0 | AUDIO_SYNC_SEREN1);
+    wait_i2s_sync(AUDIO_SYNC_ENABLE | AUDIO_SYNC_CKEN0 | AUDIO_SYNC_SEREN0);
 }
 
 static void audio_write_sample(int32_t sample)
 {
-    while ((I2S->INTFLAG.reg & AUDIO_INTFLAG_TXRDY1) == 0u) {}
-    while (I2S->SYNCBUSY.reg & AUDIO_SYNC_DATA1) {}
-    I2S->DATA[1].reg = (uint32_t)sample;
+    while ((I2S->INTFLAG.reg & AUDIO_INTFLAG_TXRDY0) == 0u) {}
+    while (I2S->SYNCBUSY.reg & AUDIO_SYNC_DATA0) {}
+    I2S->DATA[0].reg = (uint32_t)sample;
 
-    while ((I2S->INTFLAG.reg & AUDIO_INTFLAG_TXRDY1) == 0u) {}
-    while (I2S->SYNCBUSY.reg & AUDIO_SYNC_DATA1) {}
-    I2S->DATA[1].reg = (uint32_t)sample;
+    while ((I2S->INTFLAG.reg & AUDIO_INTFLAG_TXRDY0) == 0u) {}
+    while (I2S->SYNCBUSY.reg & AUDIO_SYNC_DATA0) {}
+    I2S->DATA[0].reg = (uint32_t)sample;
 }
 
 void setup(void)
