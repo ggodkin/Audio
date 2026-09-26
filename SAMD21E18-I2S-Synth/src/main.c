@@ -78,9 +78,9 @@ static void configure_i2s_pins(void)
 static void configure_i2s_clock(void)
 {
     /*
-     * GCLK3 = DFLL48M / 1 = 48 MHz.
+     * GCLK3 = DFLL48M / 2 = 24 MHz.
      */
-    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(1u);
+    GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(2u);
     wait_gclk_sync();
 
     GCLK->GENCTRL.reg =
@@ -161,7 +161,7 @@ void setup(void)
      */
     phase_increment =
         (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL *
-                    AUDIO_I2S_DIVISION * AUDIO_SLOT_BITS) / 48000000ULL);
+                    46875ULL);
 
     configure_i2s();
 }
