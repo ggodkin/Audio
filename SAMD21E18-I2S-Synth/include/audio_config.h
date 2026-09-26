@@ -8,7 +8,7 @@
 #define AUDIO_SLOT_BITS           32u
 #define AUDIO_CHANNELS              2u
 
-#define AUDIO_PIN_SD1              8u
+#define AUDIO_PIN_SD0               8u
 #define AUDIO_PIN_SCK0            10u
 #define AUDIO_PIN_FS0             11u
 #define AUDIO_PIN_MCK0             9u
