@@ -18,7 +18,7 @@ static const int32_t sine_64[64] = {
    410903206,  506158392,  596538995,  681174601,
    759250124,  830013653,  892783697,  946955746,
    992008093, 1027506861, 1053110175, 1068571463,
-  1073741823, 1068571463, 1053110175, 1027506861,
+   1073741823, 1068571463, 1053110175, 1027506861,
    992008093,  946955746,  892783697,  830013653,
    759250124,  681174601,  596538995,  506158392,
    410903206,  311690799,  209476638,  105245103,
@@ -39,9 +39,9 @@ void setup()
 {
     // Diagnostic status output: onboard LED is connected to PA17.
     // Drive the port directly so this test is independent of Arduino pin mapping.
-    // HIGH = I2S.begin() succeeded; blinking = I2S.begin() failed.
+    // ON = setup() was reached; HIGH after I2S.begin() confirms I2S.begin() returned.
     PORT->Group[0].DIRSET.reg = PORT_PA17;
-    PORT->Group[0].OUTCLR.reg = PORT_PA17;
+    PORT->Group[0].OUTSET.reg = PORT_PA17;
 
     /*
      * Arduino's SAMD I2S library requests:
@@ -61,7 +61,7 @@ void setup()
         }
     }
 
-    // Keep the diagnostic pin HIGH so we know setup reached this point.
+    // Keep the diagnostic pin HIGH so we know I2S.begin() returned successfully.
     PORT->Group[0].OUTSET.reg = PORT_PA17;
 
     phase_increment =
