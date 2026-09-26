@@ -17,7 +17,7 @@
 #define AUDIO_CLKCTRL_SCKSEL_MCKDIV (1u << 12)
 #define AUDIO_CLKCTRL_MCKSEL_GCLK   (0u << 16)
 #define AUDIO_CLKCTRL_MCKEN         (1u << 18)
-#define AUDIO_CLKCTRL_MCKDIV_4      (3u << 19)
+#define AUDIO_CLKCTRL_MCKDIV_8      (7u << 19)
 #define AUDIO_CLKCTRL_MCKOUTDIV_2   (1u << 24)
 #define AUDIO_SERCTRL_TX            (1u << 0)
 #define AUDIO_SERCTRL_SLOTADJ_LEFT  (1u << 7)
@@ -112,7 +112,7 @@ static void configure_i2s(void)
      * Internal clock generation using the SAMD21 clock chain:
      *   GCLK = 24 MHz
      *   MCK  = GCLK / 2 = 12 MHz
-     *   SCK  = MCK / 4 = 3 MHz
+       *   SCK  = GCLK / 8 = 3 MHz
      *   FS   = SCK / 64 = 46,875 Hz
      *
      * This is the nearest simple integer-divider configuration to 48 kHz.
@@ -125,7 +125,7 @@ static void configure_i2s(void)
         AUDIO_CLKCTRL_SCKSEL_MCKDIV |
         AUDIO_CLKCTRL_MCKSEL_GCLK |
         AUDIO_CLKCTRL_MCKEN |
-        AUDIO_CLKCTRL_MCKDIV_4 |
+        AUDIO_CLKCTRL_MCKDIV_8 |
         AUDIO_CLKCTRL_MCKOUTDIV_2;
 
     I2S->SERCTRL[1].reg =
