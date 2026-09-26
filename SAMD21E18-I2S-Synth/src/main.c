@@ -160,7 +160,7 @@ void setup(void)
      * 46,875 Hz, so this produces approximately 1.000 kHz.
      */
     phase_increment =
-        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL *
+        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) /
                     46875ULL);
 
     configure_i2s();
