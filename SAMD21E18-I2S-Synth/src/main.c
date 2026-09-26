@@ -18,10 +18,10 @@
 #define AUDIO_CLKCTRL_MCKSEL_GCLK   (0u << 16)
 #define AUDIO_CLKCTRL_MCKDIV_16     (15u << 19)
 #define AUDIO_SERCTRL_TX             (1u << 0)
-#define AUDIO_SERCTRL_SLOTADJ_LEFT   (1u << 7)
-#define AUDIO_SERCTRL_DATASIZE_32    (0u << 8)
-#define AUDIO_SERCTRL_CLKSEL_CLK0    (0u << 5)
-#define AUDIO_INTFLAG_TXRDY0         (1u << 9)
+#define AUDIO_SERCTRL_SLOTADJ_LEFT  (1u << 7)
+#define AUDIO_SERCTRL_DATASIZE_32   (0u << 8)
+#define AUDIO_SERCTRL_CLKSEL_CLK0   (0u << 5)
+#define AUDIO_INTFLAG_TXRDY0        (1u << 9)
 
 static const int32_t sine_64[64] = {
            0,  105245103,  209476638,  311690799,
@@ -75,19 +75,6 @@ static void configure_i2s_pins(void)
 
 static void configure_i2s_clock(void)
 {
-    /*
-     * GCLK3 = DFLL48M = 48 MHz.
-     *
-     * The I2S clock unit then generates:
-     *   SCK   = 48 MHz / (MCKDIV + 1)
-     *         = 48 MHz / 16
-     *         = 3 MHz
-     *   FS    = 3 MHz / (2 slots * 32 bits)
-     *         = 46.875 kHz
-     *
-     * MCK output is not enabled because the MAX98357A does not
-     * require an external MCLK signal.
-     */
     GCLK->GENDIV.reg = GCLK_GENDIV_ID(3u) | GCLK_GENDIV_DIV(1u);
     wait_gclk_sync();
 
@@ -150,24 +137,28 @@ static void audio_write_sample(int32_t sample)
     I2S->DATA[0].reg = (uint32_t)sample;
 }
 
+/*
+ * Temporary hardware diagnostic:
+ *
+ * Drive PA10 (D13 / I2S SCK0) as an ordinary GPIO. This deliberately
+ * bypasses the I2S peripheral so the physical pin and scope connection
+ * can be verified independently of the I2S clock/serializer setup.
+ *
+ * Expected result: a square wave on PA10. The exact frequency is not
+ * important; it is intentionally slow enough to see with the scope.
+ */
+
 void setup(void)
 {
-    /*
-     * Numerically controlled oscillator. The actual hardware
-     * sample rate is 46,875 Hz, so this produces approximately
-     * a 1 kHz tone.
-     */
-    phase_increment =
-        (uint32_t)(((uint64_t)AUDIO_TONE_HZ * 4294967296ULL) *
-                   AUDIO_ACTUAL_SAMPLE_RATE_HZ_DEN /
-                   AUDIO_ACTUAL_SAMPLE_RATE_HZ_NUM);
-
-    configure_i2s();
+    PORT->Group[0].DIRSET.reg = PORT_PA10;
+    PORT->Group[0].OUTCLR.reg = PORT_PA10;
 }
 
 void loop(void)
 {
-    const uint32_t table_index = phase >> 26;
-    audio_write_sample(sine_64[table_index]);
-    phase += phase_increment;
+    PORT->Group[0].OUTTGL.reg = PORT_PA10;
+
+    for (volatile uint32_t i = 0; i < 1000u; ++i) {
+        __asm__ volatile ("nop");
+    }
 }
