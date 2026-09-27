@@ -1,60 +1,37 @@
 /*
  * ATSAMD21E18A → MAX98357A
- * I2S sine + rotary volume + TM1638 LED&KEY (8 buttons)
+ * I2S sine + rotary volume + TM1638 LED&KEY
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
- * LED:     PA17 heartbeat
- * Encoder: PA14=A  PA15=B  (volume 0..64, start 1/32)
+ * LED:     PA17
+ * Encoder: PA14/PA15 volume
+ * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * TM1638 LED&KEY module (3-wire):
- *   PA16 = STB
- *   PA18 = CLK
- *   PA19 = DIO
- *
- * Buttons S1…S8 → C4 D4 E4 F4 G4 A4 B4 C5
+ * Audio quality:
+ *   - 256-point sine + linear interpolation (smooth even with large phase steps)
+ *   - Amplitude headroom (~0.35 full-scale) to avoid amp harshness/clipping
+ *   - Short attack/release envelope (no key clicks)
  */
 
 #include <Arduino.h>
 #include "sam.h"
+#include <math.h>
 
-/*
- * Clocking (GCLK0 = 48 MHz):
- *   MCKDIV = 3  → BCLK = 48 MHz / 4 = 12 MHz
- *   2 × 32-bit slots → LRCLK = 12 MHz / 64 = 187500 Hz  … too high for MAX98357A
- *
- * Prefer audio-range LRCLK:
- *   MCKDIV = 15 → BCLK = 3 MHz → LRCLK = 46875 Hz
- *
- * Pitch was 2 octaves low with phase_inc using 46875 while the effective
- * rate heard was ~1/4 of that. Using the nominal 46875 rate with a ×4
- * correction in set_freq_hz restores concert pitch. If your scope shows
- * a different LRCLK, change PITCH_CORR or SAMPLE_RATE_HZ to match.
- */
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
-static constexpr uint32_t PITCH_CORR     = 4;      // was 2 octaves low
-static constexpr uint32_t SINE_LEN       = 64;
+static constexpr uint32_t PITCH_CORR     = 4;
+static constexpr uint32_t SINE_LEN       = 256;
 static constexpr int      VOLUME_MAX     = 64;
 
-static const int32_t sine_table[SINE_LEN] = {
-           0,  105245103,  209476638,  311690799,
-   410903206,  506158392,  596538995,  681174601,
-   759250124,  830013653,  892783697,  946955746,
-   992008093, 1027506861, 1053110175, 1068571463,
-  1073741823, 1068571463, 1053110175, 1027506861,
-   992008093,  946955746,  892783697,  830013653,
-   759250124,  681174601,  596538995,  506158392,
-   410903206,  311690799,  209476638,  105245103,
-           0, -105245103, -209476638, -311690799,
-  -410903206, -506158392, -596538995, -681174601,
-  -759250124, -830013653, -892783697, -946955746,
-  -992008093,-1027506861,-1053110175,-1068571463,
- -1073741823,-1068571463,-1053110175,-1027506861,
-  -992008093, -946955746, -892783697, -830013653,
-  -759250124, -681174601, -596538995, -506158392,
-  -410903206, -311690799, -209476638, -105245103
-};
+// Peak amplitude ~35% of int32 full-scale (leaves headroom for the Class-D amp)
+static constexpr int32_t SINE_PEAK = 750000000;
 
-// C4 … C5 for buttons 0…7
+// Envelope: ~5 ms attack / ~10 ms release at 46.875 kHz
+static constexpr int32_t ENV_ATTACK  = 1024;   // step toward 65536 per sample
+static constexpr int32_t ENV_RELEASE = 512;
+static constexpr int32_t ENV_ONE     = 65536;  // Q16 unity
+
+static int32_t sine_table[SINE_LEN];
+
 static const uint16_t button_hz[8] = {
     262, 294, 330, 349, 392, 440, 494, 523
 };
@@ -62,9 +39,12 @@ static const uint16_t button_hz[8] = {
 static uint32_t phase     = 0;
 static uint32_t phase_inc = 0;
 
-static volatile int  volume  = VOLUME_MAX / 32;
-static volatile bool gate_on = false;
-static int           active_btn = -1;
+static volatile int volume = VOLUME_MAX / 32;
+static bool         gate_on = false;
+static int          active_btn = -1;
+
+static int32_t env_level = 0;   // Q16 0…65536
+static int32_t env_target = 0;
 
 static void set_freq_hz(uint16_t hz)
 {
@@ -72,8 +52,36 @@ static void set_freq_hz(uint16_t hz)
         phase_inc = 0;
         return;
     }
-    // phase_inc = freq / sample_rate * 2^32, with empirical pitch correction
     phase_inc = (uint32_t)(((uint64_t)hz * PITCH_CORR << 32) / SAMPLE_RATE_HZ);
+}
+
+static void sine_table_init(void)
+{
+    for (uint32_t i = 0; i < SINE_LEN; i++) {
+        float a = (2.0f * 3.14159265f * (float)i) / (float)SINE_LEN;
+        sine_table[i] = (int32_t)(sinf(a) * (float)SINE_PEAK);
+    }
+}
+
+// Linear-interpolated sine from 32-bit phase
+static int32_t sine_lookup(uint32_t ph)
+{
+    uint32_t idx  = ph >> 24;                    // top 8 bits → 0..255
+    uint32_t frac = (ph >> 16) & 0xFFu;          // next 8 bits → fraction
+    int32_t  s0   = sine_table[idx];
+    int32_t  s1   = sine_table[(idx + 1) & (SINE_LEN - 1)];
+    return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 8);
+}
+
+static void env_tick(void)
+{
+    if (env_level < env_target) {
+        env_level += ENV_ATTACK;
+        if (env_level > env_target) env_level = env_target;
+    } else if (env_level > env_target) {
+        env_level -= ENV_RELEASE;
+        if (env_level < env_target) env_level = env_target;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,10 +156,7 @@ static void tm_stb_high(void) { PORT->Group[0].OUTSET.reg = PORT_PA16; }
 static void tm_clk_low(void)  { PORT->Group[0].OUTCLR.reg = PORT_PA18; }
 static void tm_clk_high(void) { PORT->Group[0].OUTSET.reg = PORT_PA18; }
 
-static void tm_dio_out(void)
-{
-    PORT->Group[0].DIRSET.reg = PORT_PA19;
-}
+static void tm_dio_out(void) { PORT->Group[0].DIRSET.reg = PORT_PA19; }
 
 static void tm_dio_in(void)
 {
@@ -260,6 +265,22 @@ static uint8_t tm_read_keys(void)
     return keys;
 }
 
+static void note_on_btn(int i)
+{
+    active_btn = i;
+    gate_on = true;
+    set_freq_hz(button_hz[i]);
+    env_target = ENV_ONE;
+}
+
+static void note_off_all(void)
+{
+    active_btn = -1;
+    gate_on = false;
+    env_target = 0;
+    // keep phase_inc until envelope finishes (avoids zipper)
+}
+
 static void tm_poll(void)
 {
     static uint8_t prev = 0;
@@ -271,9 +292,7 @@ static void tm_poll(void)
     if (pressed) {
         for (int i = 0; i < 8; i++) {
             if (pressed & (1u << i)) {
-                active_btn = i;
-                gate_on = true;
-                set_freq_hz(button_hz[i]);
+                note_on_btn(i);
                 break;
             }
         }
@@ -283,15 +302,12 @@ static void tm_poll(void)
         if (keys) {
             for (int i = 0; i < 8; i++) {
                 if (keys & (1u << i)) {
-                    active_btn = i;
-                    set_freq_hz(button_hz[i]);
+                    note_on_btn(i);
                     break;
                 }
             }
         } else {
-            active_btn = -1;
-            gate_on = false;
-            set_freq_hz(0);
+            note_off_all();
         }
     }
 
@@ -334,7 +350,6 @@ static void configure_i2s(void)
     I2S->CTRLA.reg = I2S_CTRLA_SWRST;
     wait_i2s(I2S_SYNCBUSY_SWRST);
 
-    // MCKDIV=15 → 48 MHz/16 = 3 MHz BCLK → 46.875 kHz LRCLK
     I2S->CLKCTRL[0].reg =
         I2S_CLKCTRL_SLOTSIZE(3) |
         I2S_CLKCTRL_NBSLOTS(1) |
@@ -363,23 +378,13 @@ static void configure_i2s(void)
              I2S_SYNCBUSY_SEREN1);
 }
 
-static bool i2s_write_stereo(int32_t sample)
+static void i2s_write_stereo(int32_t sample)
 {
-    uint32_t t;
-
-    t = 0;
-    while (!(I2S->INTFLAG.bit.TXRDY1)) {
-        if (++t > 200000u) return false;
-    }
+    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
     I2S->DATA[1].reg = (uint32_t)sample;
 
-    t = 0;
-    while (!(I2S->INTFLAG.bit.TXRDY1)) {
-        if (++t > 200000u) return false;
-    }
+    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
     I2S->DATA[1].reg = (uint32_t)sample;
-
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +393,7 @@ void setup()
     led_init();
     led_blink_n(3, 50, 50);
 
+    sine_table_init();
     encoder_init();
     tm_init();
 
@@ -410,15 +416,21 @@ void loop()
         tm_poll();
     }
 
-    uint32_t idx = phase >> 26;
-    int32_t raw = sine_table[idx & (SINE_LEN - 1)];
+    env_tick();
 
-    int32_t sample = 0;
-    if (gate_on)
-        sample = (int32_t)(((int64_t)raw * volume) / VOLUME_MAX);
+    int32_t raw = sine_lookup(phase);
+
+    // Apply envelope (Q16) then user volume
+    int32_t sample = (int32_t)(((int64_t)raw * env_level) >> 16);
+    sample = (int32_t)(((int64_t)sample * volume) / VOLUME_MAX);
 
     i2s_write_stereo(sample);
+
     phase += phase_inc;
+
+    // Stop oscillator after release completes
+    if (!gate_on && env_level == 0)
+        phase_inc = 0;
 
     if (++sample_count >= (SAMPLE_RATE_HZ / 2)) {
         sample_count = 0;
