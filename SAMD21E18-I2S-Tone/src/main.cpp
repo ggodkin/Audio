@@ -1,20 +1,21 @@
 /*
  * ATSAMD21E18A → MAX98357A
- * I2S sine + rotary volume + PS/2 keyboard (note on/off)
+ * I2S sine + rotary volume + TM1638 LED&KEY (8 buttons)
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
- * LED:     PA17
+ * LED:     PA17 heartbeat
  * Encoder: PA14=A  PA15=B  (volume 0..64, start 1/32)
- * PS/2:    PA22=CLK  PA23=DATA
  *
- * PS/2 is 5 V open-collector — use a level shifter (or series
- * resistors + clamp) into the 3.3 V SAMD21 pins. Pull-ups to 3.3 V
- * on the MCU side are enabled in software.
+ * TM1638 LED&KEY module (3-wire):
+ *   PA16 = STB
+ *   PA18 = CLK
+ *   PA19 = DIO
+ *   VCC  = 5 V or 3.3 V (module dependent)
+ *   GND  = GND
  *
- * Key map (PS/2 set-2 make codes, white keys + a few blacks):
- *   A S D F G H J K  →  C4 D4 E4 F4 G4 A4 B4 C5
- *   W E T Y U        →  C# D# F# G# A#
- * Hold key = sound; release = silence (monophonic).
+ * Buttons S1…S8 → C4 D4 E4 F4 G4 A4 B4 C5
+ * Hold = note on, release = note off (monophonic).
+ * Matching LED on the module lights while held.
  */
 
 #include <Arduino.h>
@@ -43,47 +44,17 @@ static const int32_t sine_table[SINE_LEN] = {
   -410903206, -311690799, -209476638, -105245103
 };
 
+// C4 … C5 for buttons 0…7
+static const uint16_t button_hz[8] = {
+    262, 294, 330, 349, 392, 440, 494, 523
+};
+
 static uint32_t phase     = 0;
 static uint32_t phase_inc = 0;
 
-static volatile int     volume   = VOLUME_MAX / 32;  // 1/32 max
-static volatile bool    gate_on  = false;            // key held
-static volatile uint8_t active_sc = 0;               // scan code of held note
-
-// ---------------------------------------------------------------------------
-// Note table: scan code → frequency (Hz)
-// ---------------------------------------------------------------------------
-struct NoteMap {
-    uint8_t  sc;
-    uint16_t hz;
-};
-
-static const NoteMap note_map[] = {
-    // Whites
-    { 0x1C, 262 },  // A → C4
-    { 0x1B, 294 },  // S → D4
-    { 0x23, 330 },  // D → E4
-    { 0x2B, 349 },  // F → F4
-    { 0x34, 392 },  // G → G4
-    { 0x33, 440 },  // H → A4
-    { 0x3B, 494 },  // J → B4
-    { 0x42, 523 },  // K → C5
-    // Blacks
-    { 0x1D, 277 },  // W → C#4
-    { 0x24, 311 },  // E → D#4
-    { 0x2C, 370 },  // T → F#4
-    { 0x35, 415 },  // Y → G#4
-    { 0x3C, 466 },  // U → A#4
-};
-static constexpr int NOTE_MAP_LEN = sizeof(note_map) / sizeof(note_map[0]);
-
-static uint16_t sc_to_hz(uint8_t sc)
-{
-    for (int i = 0; i < NOTE_MAP_LEN; i++) {
-        if (note_map[i].sc == sc) return note_map[i].hz;
-    }
-    return 0;
-}
+static volatile int  volume  = VOLUME_MAX / 32;
+static volatile bool gate_on = false;
+static int           active_btn = -1;   // 0…7 or -1
 
 static void set_freq_hz(uint16_t hz)
 {
@@ -94,27 +65,8 @@ static void set_freq_hz(uint16_t hz)
     phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
 }
 
-static void note_on(uint8_t sc)
-{
-    uint16_t hz = sc_to_hz(sc);
-    if (!hz) return;
-    active_sc = sc;
-    gate_on   = true;
-    set_freq_hz(hz);
-}
-
-static void note_off(uint8_t sc)
-{
-    // Only silence if this is the key that is currently sounding
-    if (sc == active_sc) {
-        gate_on   = false;
-        active_sc = 0;
-        set_freq_hz(0);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// LED (PA17)
+// Heartbeat LED PA17
 // ---------------------------------------------------------------------------
 static void led_init(void)
 {
@@ -135,7 +87,7 @@ static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
 }
 
 // ---------------------------------------------------------------------------
-// Rotary encoder PA14/PA15
+// Rotary encoder PA14 / PA15
 // ---------------------------------------------------------------------------
 static uint8_t enc_prev = 0;
 
@@ -173,105 +125,179 @@ static void encoder_poll(void)
 }
 
 // ---------------------------------------------------------------------------
-// PS/2 keyboard – PA22=CLK (EXTINT6), PA23=DATA
-// Falling edge of CLK → sample DATA (LSB first)
-// Frame: start, 8 data, parity, stop  (parity ignored for simplicity)
+// TM1638 LED&KEY – PA16=STB, PA18=CLK, PA19=DIO
 // ---------------------------------------------------------------------------
-static volatile uint16_t ps2_shift  = 0;
-static volatile uint8_t  ps2_bits   = 0;
-static volatile uint8_t  ps2_byte   = 0;
-static volatile bool     ps2_ready  = false;
-static volatile bool     ps2_break  = false;  // saw 0xF0
-
-static void ps2_on_byte(uint8_t b)
+static void tm_delay(void)
 {
-    if (b == 0xF0) {
-        ps2_break = true;
-        return;
-    }
-    // Ignore extended prefix for now (0xE0) – simple keys only
-    if (b == 0xE0) return;
+    // ~1 µs at 48 MHz – enough for TM1638 timing
+    for (volatile int i = 0; i < 20; i++) {}
+}
 
-    if (ps2_break) {
-        note_off(b);
-        ps2_break = false;
-    } else {
-        note_on(b);
+static void tm_stb_low(void)  { PORT->Group[0].OUTCLR.reg = PORT_PA16; }
+static void tm_stb_high(void) { PORT->Group[0].OUTSET.reg = PORT_PA16; }
+static void tm_clk_low(void)  { PORT->Group[0].OUTCLR.reg = PORT_PA18; }
+static void tm_clk_high(void) { PORT->Group[0].OUTSET.reg = PORT_PA18; }
+
+static void tm_dio_out(void)
+{
+    PORT->Group[0].DIRSET.reg = PORT_PA19;
+}
+
+static void tm_dio_in(void)
+{
+    PORT->Group[0].DIRCLR.reg = PORT_PA19;
+    PORT->Group[0].PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+    PORT->Group[0].OUTSET.reg = PORT_PA19;  // pull-up while reading
+}
+
+static void tm_dio_write(bool v)
+{
+    if (v) PORT->Group[0].OUTSET.reg = PORT_PA19;
+    else   PORT->Group[0].OUTCLR.reg = PORT_PA19;
+}
+
+static bool tm_dio_read(void)
+{
+    return (PORT->Group[0].IN.reg & PORT_PA19) != 0;
+}
+
+static void tm_write_byte(uint8_t data)
+{
+    tm_dio_out();
+    for (int i = 0; i < 8; i++) {
+        tm_clk_low();
+        tm_dio_write(data & 0x01);
+        tm_delay();
+        tm_clk_high();
+        tm_delay();
+        data >>= 1;
     }
 }
 
-// EIC interrupt – EXTINT[6] = PA22
-extern "C" void EIC_Handler(void)
+static uint8_t tm_read_byte(void)
 {
-    if (EIC->INTFLAG.reg & (1u << 6)) {
-        EIC->INTFLAG.reg = (1u << 6);   // clear
+    uint8_t data = 0;
+    tm_dio_in();
+    for (int i = 0; i < 8; i++) {
+        data >>= 1;
+        tm_clk_low();
+        tm_delay();
+        if (tm_dio_read()) data |= 0x80;
+        tm_clk_high();
+        tm_delay();
+    }
+    return data;
+}
 
-        // Sample DATA on PA23
-        uint32_t bit = (PORT->Group[0].IN.reg & PORT_PA23) ? 1u : 0u;
+static void tm_cmd(uint8_t cmd)
+{
+    tm_stb_low();
+    tm_write_byte(cmd);
+    tm_stb_high();
+}
 
-        if (ps2_bits == 0) {
-            // Expect start bit = 0
-            if (bit == 0) {
-                ps2_shift = 0;
-                ps2_bits  = 1;
+static void tm_init(void)
+{
+    PORT->Group[0].DIRSET.reg = PORT_PA16 | PORT_PA18 | PORT_PA19;
+    PORT->Group[0].PINCFG[16].reg = 0;
+    PORT->Group[0].PINCFG[18].reg = 0;
+    PORT->Group[0].PINCFG[19].reg = 0;
+    tm_stb_high();
+    tm_clk_high();
+    tm_dio_write(true);
+
+    tm_cmd(0x8F);           // display on, brightness max
+    tm_cmd(0x40);           // auto-increment address mode
+
+    // Clear grid/segment RAM (16 bytes) + LEDs off
+    tm_stb_low();
+    tm_write_byte(0xC0);    // address 0
+    for (int i = 0; i < 16; i++)
+        tm_write_byte(0x00);
+    tm_stb_high();
+}
+
+// LEDs sit at odd addresses 1,3,5,...,15 on typical LED&KEY boards
+static void tm_set_leds(uint8_t mask)
+{
+    for (int i = 0; i < 8; i++) {
+        tm_stb_low();
+        tm_write_byte(0xC1 + (i * 2));          // LED address
+        tm_write_byte((mask & (1u << i)) ? 0x01 : 0x00);
+        tm_stb_high();
+    }
+}
+
+/*
+ * Key scan: command 0x42, then 4 bytes.
+ * On common LED&KEY modules the 8 buttons appear as bits in these
+ * bytes (layout varies slightly by clone). We normalize to bit0=S1 … bit7=S8.
+ */
+static uint8_t tm_read_keys(void)
+{
+    uint8_t raw[4];
+
+    tm_stb_low();
+    tm_write_byte(0x42);
+    for (int i = 0; i < 4; i++)
+        raw[i] = tm_read_byte();
+    tm_stb_high();
+    tm_dio_out();
+
+    // Typical mapping: each pair of bits in successive bytes
+    uint8_t keys = 0;
+    if (raw[0] & 0x01) keys |= (1u << 0);  // S1
+    if (raw[1] & 0x01) keys |= (1u << 1);  // S2
+    if (raw[2] & 0x01) keys |= (1u << 2);  // S3
+    if (raw[3] & 0x01) keys |= (1u << 3);  // S4
+    if (raw[0] & 0x10) keys |= (1u << 4);  // S5
+    if (raw[1] & 0x10) keys |= (1u << 5);  // S6
+    if (raw[2] & 0x10) keys |= (1u << 6);  // S7
+    if (raw[3] & 0x10) keys |= (1u << 7);  // S8
+
+    return keys;
+}
+
+static void tm_poll(void)
+{
+    static uint8_t prev = 0;
+    uint8_t keys = tm_read_keys();
+
+    // Rising edge → note on (lowest pressed button wins if several)
+    uint8_t pressed = keys & ~prev;
+    uint8_t released = prev & ~keys;
+
+    if (pressed) {
+        for (int i = 0; i < 8; i++) {
+            if (pressed & (1u << i)) {
+                active_btn = i;
+                gate_on = true;
+                set_freq_hz(button_hz[i]);
+                break;
             }
-        } else if (ps2_bits >= 1 && ps2_bits <= 8) {
-            ps2_shift |= (bit << (ps2_bits - 1));
-            ps2_bits++;
-        } else if (ps2_bits == 9) {
-            // parity – skip
-            ps2_bits++;
-        } else {
-            // stop bit – accept byte
-            ps2_byte  = (uint8_t)(ps2_shift & 0xFF);
-            ps2_ready = true;
-            ps2_bits  = 0;
         }
     }
-}
 
-static void ps2_init(void)
-{
-    // GPIO inputs + pull-ups (MCU side at 3.3 V)
-    PORT->Group[0].DIRCLR.reg = PORT_PA22 | PORT_PA23;
-    PORT->Group[0].PINCFG[22].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN | PORT_PINCFG_PMUXEN;
-    PORT->Group[0].PINCFG[23].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
-    PORT->Group[0].OUTSET.reg = PORT_PA22 | PORT_PA23;
+    if (released && active_btn >= 0 && (released & (1u << active_btn))) {
+        // Active key released
+        if (keys) {
+            // Another key still held – switch to lowest remaining
+            for (int i = 0; i < 8; i++) {
+                if (keys & (1u << i)) {
+                    active_btn = i;
+                    set_freq_hz(button_hz[i]);
+                    break;
+                }
+            }
+        } else {
+            active_btn = -1;
+            gate_on = false;
+            set_freq_hz(0);
+        }
+    }
 
-    // PA22 → EXTINT6 (peripheral function A = 0)
-    PORT->Group[0].PMUX[22 >> 1].bit.PMUXE = 0;  // even pin → PMUXE
-
-    // GCLK for EIC (ID 5)
-    GCLK->CLKCTRL.reg =
-        GCLK_CLKCTRL_ID(5) |
-        GCLK_CLKCTRL_GEN_GCLK0 |
-        GCLK_CLKCTRL_CLKEN;
-    while (GCLK->STATUS.bit.SYNCBUSY) {}
-
-    PM->APBAMASK.reg |= PM_APBAMASK_EIC;
-
-    EIC->CTRL.bit.SWRST = 1;
-    while (EIC->STATUS.bit.SYNCBUSY) {}
-
-    // Falling edge on EXTINT6
-    EIC->CONFIG[0].reg &= ~(0xFu << 24);          // clear SENSE6
-    EIC->CONFIG[0].reg |=  (0x2u << 24);          // 0x2 = FALL
-    EIC->INTENSET.reg   =  (1u << 6);
-
-    EIC->CTRL.bit.ENABLE = 1;
-    while (EIC->STATUS.bit.SYNCBUSY) {}
-
-    NVIC_EnableIRQ(EIC_IRQn);
-}
-
-static void ps2_poll(void)
-{
-    if (!ps2_ready) return;
-    noInterrupts();
-    uint8_t b = ps2_byte;
-    ps2_ready = false;
-    interrupts();
-    ps2_on_byte(b);
+    tm_set_leds(keys);   // light LEDs under held buttons
+    prev = keys;
 }
 
 // ---------------------------------------------------------------------------
@@ -363,33 +389,36 @@ void setup()
     led_blink_n(3, 50, 50);
 
     encoder_init();
-    ps2_init();
+    tm_init();
 
-    phase_inc = 0;   // silent until a key is pressed
+    phase_inc = 0;
     configure_i2s();
 
     led_on();
-    delay(150);
+    delay(100);
 }
 
 void loop()
 {
     static uint32_t sample_count = 0;
+    static uint32_t poll_div = 0;
 
     encoder_poll();
-    ps2_poll();
+
+    // TM1638 only needs ~1 kHz poll rate, not every sample
+    if (++poll_div >= 48) {
+        poll_div = 0;
+        tm_poll();
+    }
 
     uint32_t idx = phase >> 26;
     int32_t raw = sine_table[idx & (SINE_LEN - 1)];
 
-    // Gate: only output when a key is held
     int32_t sample = 0;
-    if (gate_on) {
+    if (gate_on)
         sample = (int32_t)(((int64_t)raw * volume) / VOLUME_MAX);
-    }
 
     i2s_write_stereo(sample);
-
     phase += phase_inc;
 
     if (++sample_count >= (SAMPLE_RATE_HZ / 2)) {
