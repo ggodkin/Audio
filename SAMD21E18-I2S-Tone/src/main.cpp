@@ -7,30 +7,27 @@
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * Pitch/quality notes:
- *   Measured behaviour was 2 octaves low at a nominal 46875 Hz rate,
- *   which means the effective frame rate is ~11719 Hz (48 MHz/16/256
- *   or equivalent). Using that rate directly keeps phase steps small
- *   and notes in tune without a ×4 hack (which caused harsh stepping).
+ * Restored 32-bit I2S (16-bit mode produced silence on this setup).
+ * Pitch: SAMPLE_RATE 46875 with PITCH_CORR 4 matched C4 earlier.
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-// Effective LRCLK observed / implied by pitch tests
-static constexpr uint32_t SAMPLE_RATE_HZ = 11719;
+static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
+static constexpr uint32_t PITCH_CORR     = 4;
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
-// 16-bit peak (~70% of full scale – headroom, still clear at low volume)
-static constexpr int16_t SINE_PEAK = 22000;
+// ~30% of int32 range – headroom, still clearly audible
+static constexpr int32_t SINE_PEAK = 640000000;
 
-static constexpr int32_t ENV_ATTACK  = 256;    // slower, smoother
-static constexpr int32_t ENV_RELEASE = 128;
+static constexpr int32_t ENV_ATTACK  = 512;
+static constexpr int32_t ENV_RELEASE = 256;
 static constexpr int32_t ENV_ONE     = 65536;
 
-static int16_t sine_table[SINE_LEN];
+static int32_t sine_table[SINE_LEN];
 
 static const uint16_t button_hz[8] = {
     262, 294, 330, 349, 392, 440, 494, 523
@@ -52,25 +49,24 @@ static void set_freq_hz(uint16_t hz)
         phase_inc = 0;
         return;
     }
-    phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
+    phase_inc = (uint32_t)(((uint64_t)hz * PITCH_CORR << 32) / SAMPLE_RATE_HZ);
 }
 
 static void sine_table_init(void)
 {
     for (uint32_t i = 0; i < SINE_LEN; i++) {
         float a = (2.0f * 3.14159265f * (float)i) / (float)SINE_LEN;
-        sine_table[i] = (int16_t)(sinf(a) * (float)SINE_PEAK);
+        sine_table[i] = (int32_t)(sinf(a) * (float)SINE_PEAK);
     }
 }
 
-// High-quality linear interpolation (9-bit index, 23-bit fraction)
-static int16_t sine_lookup(uint32_t ph)
+static int32_t sine_lookup(uint32_t ph)
 {
-    uint32_t idx  = ph >> 23;                         // 0..511
-    uint32_t frac = (ph >> 14) & 0x1FFu;              // 9-bit fraction
-    int16_t  s0   = sine_table[idx & (SINE_LEN - 1)];
-    int16_t  s1   = sine_table[(idx + 1) & (SINE_LEN - 1)];
-    return (int16_t)(s0 + (int32_t)(((int32_t)(s1 - s0) * (int32_t)frac) >> 9));
+    uint32_t idx  = ph >> 23;
+    uint32_t frac = (ph >> 14) & 0x1FFu;
+    int32_t  s0   = sine_table[idx & (SINE_LEN - 1)];
+    int32_t  s1   = sine_table[(idx + 1) & (SINE_LEN - 1)];
+    return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 9);
 }
 
 static void env_tick(void)
@@ -139,8 +135,6 @@ static void encoder_poll(void)
     }
 }
 
-// ---------------------------------------------------------------------------
-// TM1638
 // ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
@@ -307,8 +301,6 @@ static void tm_poll(void)
 }
 
 // ---------------------------------------------------------------------------
-// I2S – 16-bit data in 32-bit slots (MAX98357A friendly)
-// ---------------------------------------------------------------------------
 static void wait_gclk(void)
 {
     for (uint32_t i = 0; i < 100000u && GCLK->STATUS.bit.SYNCBUSY; i++) {}
@@ -341,12 +333,6 @@ static void configure_i2s(void)
     I2S->CTRLA.reg = I2S_CTRLA_SWRST;
     wait_i2s(I2S_SYNCBUSY_SWRST);
 
-    /*
-     * 32-bit slots, stereo, I2S (BITDELAY), half-frame FS.
-     * MCKDIV=15 → BCLK = 48e6/16 = 3 MHz.
-     * If the chip’s GCLK0 is not truly 48 MHz, effective LRCLK scales
-     * and SAMPLE_RATE_HZ above tracks the pitch-tested rate.
-     */
     I2S->CLKCTRL[0].reg =
         I2S_CLKCTRL_SLOTSIZE(3) |
         I2S_CLKCTRL_NBSLOTS(1) |
@@ -358,12 +344,12 @@ static void configure_i2s(void)
         I2S_CLKCTRL_MCKEN |
         I2S_CLKCTRL_MCKDIV(15);
 
-    // 16-bit words, left-adjusted in the 32-bit slot
+    // 32-bit data – known working with MAX98357A on this board
     I2S->SERCTRL[1].reg =
         I2S_SERCTRL_SERMODE_TX |
         I2S_SERCTRL_TXSAME |
         I2S_SERCTRL_SLOTADJ_LEFT |
-        I2S_SERCTRL_DATASIZE_16 |
+        I2S_SERCTRL_DATASIZE_32 |
         I2S_SERCTRL_CLKSEL_CLK0;
 
     I2S->CTRLA.reg =
@@ -376,16 +362,13 @@ static void configure_i2s(void)
              I2S_SYNCBUSY_SEREN1);
 }
 
-static void i2s_write_stereo(int16_t sample)
+static void i2s_write_stereo(int32_t sample)
 {
-    // Left-aligned 16-bit in 32-bit DATA register
-    uint32_t word = ((uint32_t)(uint16_t)sample) << 16;
+    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
+    I2S->DATA[1].reg = (uint32_t)sample;
 
     while (!(I2S->INTFLAG.bit.TXRDY1)) {}
-    I2S->DATA[1].reg = word;
-
-    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
-    I2S->DATA[1].reg = word;
+    I2S->DATA[1].reg = (uint32_t)sample;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,25 +395,18 @@ void loop()
 
     encoder_poll();
 
-    // Poll keys less often (~ every 2 ms at 11.7 kHz)
-    if (++poll_div >= 24) {
+    if (++poll_div >= 48) {
         poll_div = 0;
         tm_poll();
     }
 
     env_tick();
 
-    int16_t raw = sine_lookup(phase);
+    int32_t raw = sine_lookup(phase);
+    int32_t sample = (int32_t)(((int64_t)raw * env_level) >> 16);
+    sample = (int32_t)(((int64_t)sample * volume) / VOLUME_MAX);
 
-    // Envelope then volume (both gentle)
-    int32_t s = (int32_t)raw;
-    s = (s * env_level) >> 16;
-    s = (s * volume) / VOLUME_MAX;
-
-    if (s >  32767) s =  32767;
-    if (s < -32768) s = -32768;
-
-    i2s_write_stereo((int16_t)s);
+    i2s_write_stereo(sample);
 
     phase += phase_inc;
 
