@@ -7,7 +7,7 @@
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * Buttons S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
+ * S1…S8 (left→right) → C5 D5 E5 F5 G5 A5 B5 C6
  */
 
 #include <Arduino.h>
@@ -19,8 +19,7 @@ static constexpr uint32_t PITCH_CORR     = 4;
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
-// ~30% of int32 range – headroom, still clearly audible
-static constexpr int32_t SINE_PEAK = 640000000;
+static constexpr int32_t SINE_PEAK = 500000000;  // ~25% FS – less harsh
 
 static constexpr int32_t ENV_ATTACK  = 512;
 static constexpr int32_t ENV_RELEASE = 256;
@@ -32,6 +31,15 @@ static int32_t sine_table[SINE_LEN];
 static const uint16_t button_hz[8] = {
     523, 587, 659, 698, 784, 880, 988, 1047
 };
+
+/*
+ * TM1638 key bits are not left→right in scan order on many LED&KEY boards.
+ * phys_bit[n] = which scan bit corresponds to physical button n (0=leftmost S1).
+ * Common layout: S1,S2,S3,S4,S5,S6,S7,S8 → bits 0,1,2,3,4,5,6,7
+ * Alternate (interleaved): 0,4,1,5,2,6,3,7
+ * If order is still wrong, change this array only.
+ */
+static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 static uint32_t phase     = 0;
 static uint32_t phase_inc = 0;
@@ -138,7 +146,7 @@ static void encoder_poll(void)
 // ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
-    for (volatile int i = 0; i < 20; i++) {}
+    for (volatile int i = 0; i < 12; i++) {}
 }
 
 static void tm_stb_low(void)  { PORT->Group[0].OUTCLR.reg = PORT_PA16; }
@@ -220,17 +228,19 @@ static void tm_init(void)
     tm_stb_high();
 }
 
-static void tm_set_leds(uint8_t mask)
+static void tm_set_leds(uint8_t note_mask)
 {
-    for (int i = 0; i < 8; i++) {
+    // note_mask bit n = physical button n → light matching LED
+    for (int n = 0; n < 8; n++) {
+        uint8_t bit = phys_bit[n];
         tm_stb_low();
-        tm_write_byte(0xC1 + (i * 2));
-        tm_write_byte((mask & (1u << i)) ? 0x01 : 0x00);
+        tm_write_byte(0xC1 + (bit * 2));
+        tm_write_byte((note_mask & (1u << n)) ? 0x01 : 0x00);
         tm_stb_high();
     }
 }
 
-static uint8_t tm_read_keys(void)
+static uint8_t tm_read_keys_raw(void)
 {
     uint8_t raw[4];
     tm_stb_low();
@@ -240,6 +250,7 @@ static uint8_t tm_read_keys(void)
     tm_stb_high();
     tm_dio_out();
 
+    // Scan bits 0..7 as used by phys_bit[]
     uint8_t keys = 0;
     if (raw[0] & 0x01) keys |= (1u << 0);
     if (raw[1] & 0x01) keys |= (1u << 1);
@@ -250,6 +261,17 @@ static uint8_t tm_read_keys(void)
     if (raw[2] & 0x10) keys |= (1u << 6);
     if (raw[3] & 0x10) keys |= (1u << 7);
     return keys;
+}
+
+// Convert raw scan bits → mask in physical left→right order (bit0 = S1)
+static uint8_t keys_physical(uint8_t raw)
+{
+    uint8_t m = 0;
+    for (int n = 0; n < 8; n++) {
+        if (raw & (1u << phys_bit[n]))
+            m |= (1u << n);
+    }
+    return m;
 }
 
 static void note_on_btn(int i)
@@ -270,7 +292,7 @@ static void note_off_all(void)
 static void tm_poll(void)
 {
     static uint8_t prev = 0;
-    uint8_t keys = tm_read_keys();
+    uint8_t keys = keys_physical(tm_read_keys_raw());
     uint8_t pressed  = keys & ~prev;
     uint8_t released = prev & ~keys;
 
@@ -394,7 +416,11 @@ void loop()
 
     encoder_poll();
 
-    if (++poll_div >= 48) {
+    /*
+     * TM1638 bit-bang is slow. Polling it too often starves I2S (TXSAME
+     * repeats samples → strong harmonics). ~5 ms is plenty for buttons.
+     */
+    if (++poll_div >= 250) {
         poll_div = 0;
         tm_poll();
     }
