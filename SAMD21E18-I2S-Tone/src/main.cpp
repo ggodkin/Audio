@@ -7,8 +7,7 @@
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * Restored 32-bit I2S (16-bit mode produced silence on this setup).
- * Pitch: SAMPLE_RATE 46875 with PITCH_CORR 4 matched C4 earlier.
+ * Buttons S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  */
 
 #include <Arduino.h>
@@ -29,8 +28,9 @@ static constexpr int32_t ENV_ONE     = 65536;
 
 static int32_t sine_table[SINE_LEN];
 
+// C5 … C6
 static const uint16_t button_hz[8] = {
-    262, 294, 330, 349, 392, 440, 494, 523
+    523, 587, 659, 698, 784, 880, 988, 1047
 };
 
 static uint32_t phase     = 0;
@@ -344,7 +344,6 @@ static void configure_i2s(void)
         I2S_CLKCTRL_MCKEN |
         I2S_CLKCTRL_MCKDIV(15);
 
-    // 32-bit data – known working with MAX98357A on this board
     I2S->SERCTRL[1].reg =
         I2S_SERCTRL_SERMODE_TX |
         I2S_SERCTRL_TXSAME |
