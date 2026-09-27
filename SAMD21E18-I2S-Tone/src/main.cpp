@@ -16,6 +16,7 @@
  *   (internal pull-ups enabled; no external resistors needed)
  *
  * Turn encoder → volume 0…64 (0 = mute, 64 = full scale)
+ * Starts at 1/32 of max (volume = 2)
  */
 
 #include <Arduino.h>
@@ -49,7 +50,8 @@ static uint32_t phase     = 0;
 static uint32_t phase_inc = 0;
 
 // Volume: 0 = mute … VOLUME_MAX = full
-static volatile int volume = VOLUME_MAX / 2;   // start at 50 %
+// Start at 1/32 of max
+static volatile int volume = VOLUME_MAX / 32;   // = 2
 
 // ---------------------------------------------------------------------------
 // LED (PA17)
