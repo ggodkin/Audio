@@ -8,6 +8,9 @@
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
  * S1…S8 (left→right) → C5 D5 E5 F5 G5 A5 B5 C6
+ *
+ * Pitch: iPhone spectrum readings were ~4× nominal with PITCH_CORR=4
+ * (2043 Hz vs 523, etc.). PITCH_CORR=1 targets true C5…C6.
  */
 
 #include <Arduino.h>
@@ -15,11 +18,11 @@
 #include <math.h>
 
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
-static constexpr uint32_t PITCH_CORR     = 4;
+static constexpr uint32_t PITCH_CORR     = 1;   // was 4; measured 4× too high
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
-static constexpr int32_t SINE_PEAK = 500000000;  // ~25% FS – less harsh
+static constexpr int32_t SINE_PEAK = 400000000;  // ~20% FS
 
 static constexpr int32_t ENV_ATTACK  = 512;
 static constexpr int32_t ENV_RELEASE = 256;
@@ -32,13 +35,6 @@ static const uint16_t button_hz[8] = {
     523, 587, 659, 698, 784, 880, 988, 1047
 };
 
-/*
- * TM1638 key bits are not left→right in scan order on many LED&KEY boards.
- * phys_bit[n] = which scan bit corresponds to physical button n (0=leftmost S1).
- * Common layout: S1,S2,S3,S4,S5,S6,S7,S8 → bits 0,1,2,3,4,5,6,7
- * Alternate (interleaved): 0,4,1,5,2,6,3,7
- * If order is still wrong, change this array only.
- */
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 static uint32_t phase     = 0;
@@ -230,7 +226,6 @@ static void tm_init(void)
 
 static void tm_set_leds(uint8_t note_mask)
 {
-    // note_mask bit n = physical button n → light matching LED
     for (int n = 0; n < 8; n++) {
         uint8_t bit = phys_bit[n];
         tm_stb_low();
@@ -250,7 +245,6 @@ static uint8_t tm_read_keys_raw(void)
     tm_stb_high();
     tm_dio_out();
 
-    // Scan bits 0..7 as used by phys_bit[]
     uint8_t keys = 0;
     if (raw[0] & 0x01) keys |= (1u << 0);
     if (raw[1] & 0x01) keys |= (1u << 1);
@@ -263,7 +257,6 @@ static uint8_t tm_read_keys_raw(void)
     return keys;
 }
 
-// Convert raw scan bits → mask in physical left→right order (bit0 = S1)
 static uint8_t keys_physical(uint8_t raw)
 {
     uint8_t m = 0;
@@ -416,10 +409,6 @@ void loop()
 
     encoder_poll();
 
-    /*
-     * TM1638 bit-bang is slow. Polling it too often starves I2S (TXSAME
-     * repeats samples → strong harmonics). ~5 ms is plenty for buttons.
-     */
     if (++poll_div >= 250) {
         poll_div = 0;
         tm_poll();
