@@ -1,28 +1,25 @@
 /*
- * ATSAMD21E18A → MAX98357A – 440 Hz I2S tone + rotary volume
+ * ATSAMD21E18A → MAX98357A
+ * I2S sine + rotary volume + PS/2 keyboard (note on/off)
  *
- * I2S:
- *   PA08 = DIN (SD1)
- *   PA10 = BCLK (SCK0)
- *   PA11 = LRCLK (FS0)
+ * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
+ * LED:     PA17
+ * Encoder: PA14=A  PA15=B  (volume 0..64, start 1/32)
+ * PS/2:    PA22=CLK  PA23=DATA
  *
- * LED:
- *   PA17 = heartbeat
+ * PS/2 is 5 V open-collector — use a level shifter (or series
+ * resistors + clamp) into the 3.3 V SAMD21 pins. Pull-ups to 3.3 V
+ * on the MCU side are enabled in software.
  *
- * Rotary encoder (quadrature):
- *   PA14 = A  (CLK)
- *   PA15 = B  (DT)
- *   Common → GND
- *   (internal pull-ups enabled; no external resistors needed)
- *
- * Turn encoder → volume 0…64 (0 = mute, 64 = full scale)
- * Starts at 1/32 of max (volume = 2)
+ * Key map (PS/2 set-2 make codes, white keys + a few blacks):
+ *   A S D F G H J K  →  C4 D4 E4 F4 G4 A4 B4 C5
+ *   W E T Y U        →  C# D# F# G# A#
+ * Hold key = sound; release = silence (monophonic).
  */
 
 #include <Arduino.h>
 #include "sam.h"
 
-static constexpr uint32_t TONE_HZ        = 440;
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 64;
 static constexpr int      VOLUME_MAX     = 64;
@@ -49,9 +46,72 @@ static const int32_t sine_table[SINE_LEN] = {
 static uint32_t phase     = 0;
 static uint32_t phase_inc = 0;
 
-// Volume: 0 = mute … VOLUME_MAX = full
-// Start at 1/32 of max
-static volatile int volume = VOLUME_MAX / 32;   // = 2
+static volatile int     volume   = VOLUME_MAX / 32;  // 1/32 max
+static volatile bool    gate_on  = false;            // key held
+static volatile uint8_t active_sc = 0;               // scan code of held note
+
+// ---------------------------------------------------------------------------
+// Note table: scan code → frequency (Hz)
+// ---------------------------------------------------------------------------
+struct NoteMap {
+    uint8_t  sc;
+    uint16_t hz;
+};
+
+static const NoteMap note_map[] = {
+    // Whites
+    { 0x1C, 262 },  // A → C4
+    { 0x1B, 294 },  // S → D4
+    { 0x23, 330 },  // D → E4
+    { 0x2B, 349 },  // F → F4
+    { 0x34, 392 },  // G → G4
+    { 0x33, 440 },  // H → A4
+    { 0x3B, 494 },  // J → B4
+    { 0x42, 523 },  // K → C5
+    // Blacks
+    { 0x1D, 277 },  // W → C#4
+    { 0x24, 311 },  // E → D#4
+    { 0x2C, 370 },  // T → F#4
+    { 0x35, 415 },  // Y → G#4
+    { 0x3C, 466 },  // U → A#4
+};
+static constexpr int NOTE_MAP_LEN = sizeof(note_map) / sizeof(note_map[0]);
+
+static uint16_t sc_to_hz(uint8_t sc)
+{
+    for (int i = 0; i < NOTE_MAP_LEN; i++) {
+        if (note_map[i].sc == sc) return note_map[i].hz;
+    }
+    return 0;
+}
+
+static void set_freq_hz(uint16_t hz)
+{
+    if (hz == 0) {
+        phase_inc = 0;
+        return;
+    }
+    phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
+}
+
+static void note_on(uint8_t sc)
+{
+    uint16_t hz = sc_to_hz(sc);
+    if (!hz) return;
+    active_sc = sc;
+    gate_on   = true;
+    set_freq_hz(hz);
+}
+
+static void note_off(uint8_t sc)
+{
+    // Only silence if this is the key that is currently sounding
+    if (sc == active_sc) {
+        gate_on   = false;
+        active_sc = 0;
+        set_freq_hz(0);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // LED (PA17)
@@ -71,32 +131,28 @@ static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
         led_on();  delay(on_ms);
         led_off(); delay(off_ms);
     }
-    delay(200);
+    delay(150);
 }
 
 // ---------------------------------------------------------------------------
-// Rotary encoder on PA14 (A) / PA15 (B) – polled quadrature
+// Rotary encoder PA14/PA15
 // ---------------------------------------------------------------------------
 static uint8_t enc_prev = 0;
 
 static void encoder_init(void)
 {
-    // Inputs with pull-ups
     PORT->Group[0].DIRCLR.reg = PORT_PA14 | PORT_PA15;
     PORT->Group[0].PINCFG[14].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
     PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
-    PORT->Group[0].OUTSET.reg = PORT_PA14 | PORT_PA15;   // pull-up
+    PORT->Group[0].OUTSET.reg = PORT_PA14 | PORT_PA15;
 
-    // Initial state
     uint32_t in = PORT->Group[0].IN.reg;
     enc_prev = ((in & PORT_PA14) ? 1 : 0) | ((in & PORT_PA15) ? 2 : 0);
 }
 
-// Call often from the sample loop. Gray-code table for one detent step.
 static void encoder_poll(void)
 {
     static const int8_t table[16] = {
-    // prev<<2 | curr
          0, -1,  1,  0,
          1,  0,  0, -1,
         -1,  0,  0,  1,
@@ -110,10 +166,112 @@ static void encoder_poll(void)
 
     if (delta) {
         int v = volume + delta;
-        if (v < 0)            v = 0;
-        if (v > VOLUME_MAX)   v = VOLUME_MAX;
+        if (v < 0)          v = 0;
+        if (v > VOLUME_MAX) v = VOLUME_MAX;
         volume = v;
     }
+}
+
+// ---------------------------------------------------------------------------
+// PS/2 keyboard – PA22=CLK (EXTINT6), PA23=DATA
+// Falling edge of CLK → sample DATA (LSB first)
+// Frame: start, 8 data, parity, stop  (parity ignored for simplicity)
+// ---------------------------------------------------------------------------
+static volatile uint16_t ps2_shift  = 0;
+static volatile uint8_t  ps2_bits   = 0;
+static volatile uint8_t  ps2_byte   = 0;
+static volatile bool     ps2_ready  = false;
+static volatile bool     ps2_break  = false;  // saw 0xF0
+
+static void ps2_on_byte(uint8_t b)
+{
+    if (b == 0xF0) {
+        ps2_break = true;
+        return;
+    }
+    // Ignore extended prefix for now (0xE0) – simple keys only
+    if (b == 0xE0) return;
+
+    if (ps2_break) {
+        note_off(b);
+        ps2_break = false;
+    } else {
+        note_on(b);
+    }
+}
+
+// EIC interrupt – EXTINT[6] = PA22
+extern "C" void EIC_Handler(void)
+{
+    if (EIC->INTFLAG.reg & (1u << 6)) {
+        EIC->INTFLAG.reg = (1u << 6);   // clear
+
+        // Sample DATA on PA23
+        uint32_t bit = (PORT->Group[0].IN.reg & PORT_PA23) ? 1u : 0u;
+
+        if (ps2_bits == 0) {
+            // Expect start bit = 0
+            if (bit == 0) {
+                ps2_shift = 0;
+                ps2_bits  = 1;
+            }
+        } else if (ps2_bits >= 1 && ps2_bits <= 8) {
+            ps2_shift |= (bit << (ps2_bits - 1));
+            ps2_bits++;
+        } else if (ps2_bits == 9) {
+            // parity – skip
+            ps2_bits++;
+        } else {
+            // stop bit – accept byte
+            ps2_byte  = (uint8_t)(ps2_shift & 0xFF);
+            ps2_ready = true;
+            ps2_bits  = 0;
+        }
+    }
+}
+
+static void ps2_init(void)
+{
+    // GPIO inputs + pull-ups (MCU side at 3.3 V)
+    PORT->Group[0].DIRCLR.reg = PORT_PA22 | PORT_PA23;
+    PORT->Group[0].PINCFG[22].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN | PORT_PINCFG_PMUXEN;
+    PORT->Group[0].PINCFG[23].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+    PORT->Group[0].OUTSET.reg = PORT_PA22 | PORT_PA23;
+
+    // PA22 → EXTINT6 (peripheral function A = 0)
+    PORT->Group[0].PMUX[22 >> 1].bit.PMUXE = 0;  // even pin → PMUXE
+
+    // GCLK for EIC (ID 5)
+    GCLK->CLKCTRL.reg =
+        GCLK_CLKCTRL_ID(5) |
+        GCLK_CLKCTRL_GEN_GCLK0 |
+        GCLK_CLKCTRL_CLKEN;
+    while (GCLK->STATUS.bit.SYNCBUSY) {}
+
+    PM->APBAMASK.reg |= PM_APBAMASK_EIC;
+
+    EIC->CTRL.bit.SWRST = 1;
+    while (EIC->STATUS.bit.SYNCBUSY) {}
+
+    // Falling edge on EXTINT6
+    EIC->CONFIG[0].reg &= ~(0xFu << 24);          // clear SENSE6
+    EIC->CONFIG[0].reg |=  (0x2u << 24);          // 0x2 = FALL
+    EIC->INTENSET.reg   =  (1u << 6);
+
+    EIC->CTRL.bit.ENABLE = 1;
+    while (EIC->STATUS.bit.SYNCBUSY) {}
+
+    NVIC_EnableIRQ(EIC_IRQn);
+}
+
+static void ps2_poll(void)
+{
+    if (!ps2_ready) return;
+    noInterrupts();
+    uint8_t b = ps2_byte;
+    ps2_ready = false;
+    interrupts();
+    ps2_on_byte(b);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,27 +363,30 @@ void setup()
     led_blink_n(3, 50, 50);
 
     encoder_init();
+    ps2_init();
 
-    phase_inc = (uint32_t)(((uint64_t)TONE_HZ << 32) / SAMPLE_RATE_HZ);
-
+    phase_inc = 0;   // silent until a key is pressed
     configure_i2s();
 
     led_on();
-    delay(200);
+    delay(150);
 }
 
 void loop()
 {
     static uint32_t sample_count = 0;
 
-    // Poll encoder every sample (cheap) so detents are not missed
     encoder_poll();
+    ps2_poll();
 
     uint32_t idx = phase >> 26;
     int32_t raw = sine_table[idx & (SINE_LEN - 1)];
 
-    // Scale by volume (0…VOLUME_MAX)
-    int32_t sample = (int32_t)(((int64_t)raw * volume) / VOLUME_MAX);
+    // Gate: only output when a key is held
+    int32_t sample = 0;
+    if (gate_on) {
+        sample = (int32_t)(((int64_t)raw * volume) / VOLUME_MAX);
+    }
 
     i2s_write_stereo(sample);
 
