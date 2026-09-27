@@ -7,22 +7,22 @@
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * S1…S8 (left→right) → C5 D5 E5 F5 G5 A5 B5 C6
+ * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  *
- * Pitch: iPhone spectrum readings were ~4× nominal with PITCH_CORR=4
- * (2043 Hz vs 523, etc.). PITCH_CORR=1 targets true C5…C6.
+ * Pitch calibration (iPhone spectrum):
+ *   Programmed S1 = 523 Hz, measured = 589 Hz → ratio 589/523
+ *   SAMPLE_RATE_HZ = 46875 * 589 / 523 ≈ 52801
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
-static constexpr uint32_t PITCH_CORR     = 1;   // was 4; measured 4× too high
+static constexpr uint32_t SAMPLE_RATE_HZ = 52801;  // calibrated
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
-static constexpr int32_t SINE_PEAK = 400000000;  // ~20% FS
+static constexpr int32_t SINE_PEAK = 400000000;
 
 static constexpr int32_t ENV_ATTACK  = 512;
 static constexpr int32_t ENV_RELEASE = 256;
@@ -30,7 +30,6 @@ static constexpr int32_t ENV_ONE     = 65536;
 
 static int32_t sine_table[SINE_LEN];
 
-// C5 … C6
 static const uint16_t button_hz[8] = {
     523, 587, 659, 698, 784, 880, 988, 1047
 };
@@ -53,7 +52,7 @@ static void set_freq_hz(uint16_t hz)
         phase_inc = 0;
         return;
     }
-    phase_inc = (uint32_t)(((uint64_t)hz * PITCH_CORR << 32) / SAMPLE_RATE_HZ);
+    phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
 }
 
 static void sine_table_init(void)
@@ -84,7 +83,6 @@ static void env_tick(void)
     }
 }
 
-// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -103,7 +101,6 @@ static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
     delay(150);
 }
 
-// ---------------------------------------------------------------------------
 static uint8_t enc_prev = 0;
 
 static void encoder_init(void)
@@ -139,7 +136,6 @@ static void encoder_poll(void)
     }
 }
 
-// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 12; i++) {}
@@ -315,7 +311,6 @@ static void tm_poll(void)
     prev = keys;
 }
 
-// ---------------------------------------------------------------------------
 static void wait_gclk(void)
 {
     for (uint32_t i = 0; i < 100000u && GCLK->STATUS.bit.SYNCBUSY; i++) {}
@@ -385,7 +380,6 @@ static void i2s_write_stereo(int32_t sample)
     I2S->DATA[1].reg = (uint32_t)sample;
 }
 
-// ---------------------------------------------------------------------------
 void setup()
 {
     led_init();
