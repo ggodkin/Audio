@@ -10,18 +10,28 @@
  *   PA16 = STB
  *   PA18 = CLK
  *   PA19 = DIO
- *   VCC  = 5 V or 3.3 V (module dependent)
- *   GND  = GND
  *
  * Buttons S1…S8 → C4 D4 E4 F4 G4 A4 B4 C5
- * Hold = note on, release = note off (monophonic).
- * Matching LED on the module lights while held.
  */
 
 #include <Arduino.h>
 #include "sam.h"
 
+/*
+ * Clocking (GCLK0 = 48 MHz):
+ *   MCKDIV = 3  → BCLK = 48 MHz / 4 = 12 MHz
+ *   2 × 32-bit slots → LRCLK = 12 MHz / 64 = 187500 Hz  … too high for MAX98357A
+ *
+ * Prefer audio-range LRCLK:
+ *   MCKDIV = 15 → BCLK = 3 MHz → LRCLK = 46875 Hz
+ *
+ * Pitch was 2 octaves low with phase_inc using 46875 while the effective
+ * rate heard was ~1/4 of that. Using the nominal 46875 rate with a ×4
+ * correction in set_freq_hz restores concert pitch. If your scope shows
+ * a different LRCLK, change PITCH_CORR or SAMPLE_RATE_HZ to match.
+ */
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
+static constexpr uint32_t PITCH_CORR     = 4;      // was 2 octaves low
 static constexpr uint32_t SINE_LEN       = 64;
 static constexpr int      VOLUME_MAX     = 64;
 
@@ -54,7 +64,7 @@ static uint32_t phase_inc = 0;
 
 static volatile int  volume  = VOLUME_MAX / 32;
 static volatile bool gate_on = false;
-static int           active_btn = -1;   // 0…7 or -1
+static int           active_btn = -1;
 
 static void set_freq_hz(uint16_t hz)
 {
@@ -62,7 +72,8 @@ static void set_freq_hz(uint16_t hz)
         phase_inc = 0;
         return;
     }
-    phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
+    // phase_inc = freq / sample_rate * 2^32, with empirical pitch correction
+    phase_inc = (uint32_t)(((uint64_t)hz * PITCH_CORR << 32) / SAMPLE_RATE_HZ);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +140,6 @@ static void encoder_poll(void)
 // ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
-    // ~1 µs at 48 MHz – enough for TM1638 timing
     for (volatile int i = 0; i < 20; i++) {}
 }
 
@@ -147,7 +157,7 @@ static void tm_dio_in(void)
 {
     PORT->Group[0].DIRCLR.reg = PORT_PA19;
     PORT->Group[0].PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
-    PORT->Group[0].OUTSET.reg = PORT_PA19;  // pull-up while reading
+    PORT->Group[0].OUTSET.reg = PORT_PA19;
 }
 
 static void tm_dio_write(bool v)
@@ -206,33 +216,26 @@ static void tm_init(void)
     tm_clk_high();
     tm_dio_write(true);
 
-    tm_cmd(0x8F);           // display on, brightness max
-    tm_cmd(0x40);           // auto-increment address mode
+    tm_cmd(0x8F);
+    tm_cmd(0x40);
 
-    // Clear grid/segment RAM (16 bytes) + LEDs off
     tm_stb_low();
-    tm_write_byte(0xC0);    // address 0
+    tm_write_byte(0xC0);
     for (int i = 0; i < 16; i++)
         tm_write_byte(0x00);
     tm_stb_high();
 }
 
-// LEDs sit at odd addresses 1,3,5,...,15 on typical LED&KEY boards
 static void tm_set_leds(uint8_t mask)
 {
     for (int i = 0; i < 8; i++) {
         tm_stb_low();
-        tm_write_byte(0xC1 + (i * 2));          // LED address
+        tm_write_byte(0xC1 + (i * 2));
         tm_write_byte((mask & (1u << i)) ? 0x01 : 0x00);
         tm_stb_high();
     }
 }
 
-/*
- * Key scan: command 0x42, then 4 bytes.
- * On common LED&KEY modules the 8 buttons appear as bits in these
- * bytes (layout varies slightly by clone). We normalize to bit0=S1 … bit7=S8.
- */
 static uint8_t tm_read_keys(void)
 {
     uint8_t raw[4];
@@ -244,16 +247,15 @@ static uint8_t tm_read_keys(void)
     tm_stb_high();
     tm_dio_out();
 
-    // Typical mapping: each pair of bits in successive bytes
     uint8_t keys = 0;
-    if (raw[0] & 0x01) keys |= (1u << 0);  // S1
-    if (raw[1] & 0x01) keys |= (1u << 1);  // S2
-    if (raw[2] & 0x01) keys |= (1u << 2);  // S3
-    if (raw[3] & 0x01) keys |= (1u << 3);  // S4
-    if (raw[0] & 0x10) keys |= (1u << 4);  // S5
-    if (raw[1] & 0x10) keys |= (1u << 5);  // S6
-    if (raw[2] & 0x10) keys |= (1u << 6);  // S7
-    if (raw[3] & 0x10) keys |= (1u << 7);  // S8
+    if (raw[0] & 0x01) keys |= (1u << 0);
+    if (raw[1] & 0x01) keys |= (1u << 1);
+    if (raw[2] & 0x01) keys |= (1u << 2);
+    if (raw[3] & 0x01) keys |= (1u << 3);
+    if (raw[0] & 0x10) keys |= (1u << 4);
+    if (raw[1] & 0x10) keys |= (1u << 5);
+    if (raw[2] & 0x10) keys |= (1u << 6);
+    if (raw[3] & 0x10) keys |= (1u << 7);
 
     return keys;
 }
@@ -263,8 +265,7 @@ static void tm_poll(void)
     static uint8_t prev = 0;
     uint8_t keys = tm_read_keys();
 
-    // Rising edge → note on (lowest pressed button wins if several)
-    uint8_t pressed = keys & ~prev;
+    uint8_t pressed  = keys & ~prev;
     uint8_t released = prev & ~keys;
 
     if (pressed) {
@@ -279,9 +280,7 @@ static void tm_poll(void)
     }
 
     if (released && active_btn >= 0 && (released & (1u << active_btn))) {
-        // Active key released
         if (keys) {
-            // Another key still held – switch to lowest remaining
             for (int i = 0; i < 8; i++) {
                 if (keys & (1u << i)) {
                     active_btn = i;
@@ -296,7 +295,7 @@ static void tm_poll(void)
         }
     }
 
-    tm_set_leds(keys);   // light LEDs under held buttons
+    tm_set_leds(keys);
     prev = keys;
 }
 
@@ -335,6 +334,7 @@ static void configure_i2s(void)
     I2S->CTRLA.reg = I2S_CTRLA_SWRST;
     wait_i2s(I2S_SYNCBUSY_SWRST);
 
+    // MCKDIV=15 → 48 MHz/16 = 3 MHz BCLK → 46.875 kHz LRCLK
     I2S->CLKCTRL[0].reg =
         I2S_CLKCTRL_SLOTSIZE(3) |
         I2S_CLKCTRL_NBSLOTS(1) |
@@ -405,7 +405,6 @@ void loop()
 
     encoder_poll();
 
-    // TM1638 only needs ~1 kHz poll rate, not every sample
     if (++poll_div >= 48) {
         poll_div = 0;
         tm_poll();
