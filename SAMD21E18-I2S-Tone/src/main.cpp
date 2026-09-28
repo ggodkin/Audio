@@ -1,8 +1,7 @@
 /*
  * ATSAMD21E18A → MAX98357A
  *
- * Audio runs in I2S TXRDY interrupt so TM1638/encoder in main loop
- * cannot gap the sample stream (that caused ~47 Hz AM under the tone).
+ * Audio in I2S TXRDY ISR; keys/encoder in main loop.
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
@@ -19,6 +18,7 @@
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
+static constexpr int      VOLUME_STEP    = 2;   // per encoder detent
 
 static constexpr int32_t SINE_PEAK = 300000000;
 
@@ -37,14 +37,13 @@ static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 static volatile uint32_t phase     = 0;
 static volatile uint32_t phase_inc = 0;
 
-static volatile int volume = VOLUME_MAX / 32;
+static volatile int volume = VOLUME_MAX / 4;  // start 25%
 static volatile bool gate_on = false;
 static volatile int  active_btn = -1;
 
 static volatile int32_t env_level  = 0;
 static volatile int32_t env_target = 0;
 
-// ISR writes L then R on alternate TXRDY events
 static volatile uint8_t i2s_slot = 0;
 static volatile int32_t i2s_hold = 0;
 
@@ -74,17 +73,12 @@ static int32_t sine_lookup(uint32_t ph)
     return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 10);
 }
 
-// ---------------------------------------------------------------------------
-// I2S TX interrupt – one stereo frame = two TXRDY events
-// ---------------------------------------------------------------------------
 extern "C" void I2S_Handler(void)
 {
     if (!(I2S->INTFLAG.bit.TXRDY1))
         return;
 
-    // Clear by writing DATA (TXRDY clears on write)
     if (i2s_slot == 0) {
-        // Start of frame: compute one sample for L and R
         int32_t el = env_level;
         int32_t et = env_target;
         if (el < et) {
@@ -114,7 +108,6 @@ extern "C" void I2S_Handler(void)
     }
 }
 
-// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -161,7 +154,7 @@ static void encoder_poll(void)
     enc_prev = curr;
 
     if (delta) {
-        int v = volume + delta;
+        int v = volume + delta * VOLUME_STEP;
         if (v < 0)          v = 0;
         if (v > VOLUME_MAX) v = VOLUME_MAX;
         volume = v;
@@ -392,7 +385,6 @@ static void configure_i2s(void)
         I2S_SERCTRL_DATASIZE_32 |
         I2S_SERCTRL_CLKSEL_CLK0;
 
-    // Enable TXRDY1 interrupt before enabling serializer
     I2S->INTENSET.reg = I2S_INTENSET_TXRDY1;
     NVIC_SetPriority(I2S_IRQn, 0);
     NVIC_EnableIRQ(I2S_IRQn);
@@ -406,7 +398,6 @@ static void configure_i2s(void)
              I2S_SYNCBUSY_CKEN0  |
              I2S_SYNCBUSY_SEREN1);
 
-    // Prime first sample so TXRDY keeps firing
     i2s_slot = 0;
     I2S->DATA[1].reg = 0;
 }
@@ -429,9 +420,10 @@ void setup()
 
 void loop()
 {
-    // All slow work is fine here – audio is in the I2S ISR
-    encoder_poll();
+    // Poll encoder hard between TM1638 scans so no detent is missed
+    for (int i = 0; i < 40; i++) {
+        encoder_poll();
+        delayMicroseconds(200);
+    }
     tm_poll();
-    delay(5);   // ~200 Hz UI rate; no effect on sample timing
-    led_toggle();
 }
