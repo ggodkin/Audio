@@ -10,7 +10,7 @@
  * Display right 4: volume 0–64 or preset index 1–4
  *
  * Encoder push: toggle volume ↔ preset select
- * Encoder turn: adjust volume or change preset
+ * Encoder turn: volume (fine) or preset (1 step / detent)
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  */
@@ -25,6 +25,7 @@ static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
 static constexpr int      NUM_VOICES     = 4;
 static constexpr int      NUM_PRESETS    = 4;
+static constexpr int      PRESET_EDGES   = 4;  // quadrature edges per detent
 
 static constexpr int32_t SINE_PEAK = 280000000;
 static constexpr int32_t ENV_ONE   = 65536;
@@ -37,66 +38,53 @@ static const uint16_t button_hz[8] = {
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
-// 7-segment (gfedcba)
 static const uint8_t SEG_DIGIT[10] = {
     0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
 };
 static constexpr uint8_t SEG_BLANK = 0x00;
 static constexpr uint8_t SEG_A = 0x77;
 static constexpr uint8_t SEG_B = 0x7C;
-static constexpr uint8_t SEG_C = 0x39;
 static constexpr uint8_t SEG_D = 0x5E;
-static constexpr uint8_t SEG_E = 0x79;
-static constexpr uint8_t SEG_F = 0x71;
 static constexpr uint8_t SEG_G = 0x3D;
-static constexpr uint8_t SEG_H = 0x76;
-static constexpr uint8_t SEG_I = 0x30;
-static constexpr uint8_t SEG_J = 0x1E;
 static constexpr uint8_t SEG_K = 0x75;
 static constexpr uint8_t SEG_L = 0x38;
-static constexpr uint8_t SEG_M = 0x37;
-static constexpr uint8_t SEG_N = 0x54;
 static constexpr uint8_t SEG_O = 0x3F;
 static constexpr uint8_t SEG_P = 0x73;
 static constexpr uint8_t SEG_R = 0x50;
 static constexpr uint8_t SEG_S = 0x6D;
-static constexpr uint8_t SEG_T = 0x78;
-static constexpr uint8_t SEG_U = 0x3E;
 static constexpr uint8_t SEG_V = 0x3E;
-static constexpr uint8_t SEG_Y = 0x6E;
 
-// ---------------------------------------------------------------------------
-// ADSR presets
-// Rates are added/subtracted each sample at ~31.8 kHz effective frame rate.
-// Larger rate = faster stage.
-// ---------------------------------------------------------------------------
 enum EnvStage : uint8_t { ENV_IDLE = 0, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
 
 struct Adsr {
-    int32_t attack;    // per sample toward ENV_ONE
-    int32_t decay;     // per sample toward sustain
-    int32_t sustain;   // 0…ENV_ONE
-    int32_t release;   // per sample toward 0
-    uint8_t label[4];  // 7-seg chars for left display
+    int32_t attack;
+    int32_t decay;
+    int32_t sustain;
+    int32_t release;
+    uint8_t label[4];
 };
 
-// ORG  – organ: fast attack, full sustain, medium release
-// PLK  – pluck: instant attack, fast decay to 0, short release
-// PAD  – pad:   slow attack, high sustain, long release
-// BRS  – brass: medium attack, slight decay, high sustain
+/*
+ * Rates per sample at ~31.8 kHz. Time ≈ ENV_ONE / rate / SAMPLE_RATE seconds.
+ *
+ * ORG – instant on, full sustain, ~0.3 s release  (continuous organ)
+ * PLK – instant on, ~15 ms decay to silence       (short pluck; no sustain)
+ * PAD – ~1.0 s attack, full sustain, ~2 s release (slow swell)
+ * BRS – ~0.2 s attack, decay to 50%, medium release
+ */
 static const Adsr PRESETS[NUM_PRESETS] = {
-    { 512,  256, ENV_ONE,          128, { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
-    { 2048,  64, 0,                 96, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
-    {  48,   32, (ENV_ONE * 7) / 8, 24, { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
-    { 128,   80, (ENV_ONE * 3) / 4, 80, { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
+    // attack  decay  sustain           release
+    { 4096,    256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
+    { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
+    {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
+    {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
 };
 
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
 
-static volatile int     volume       = VOLUME_MAX / 4;
-static volatile uint8_t preset_idx   = 0;
-static volatile uint8_t ui_mode      = MODE_VOLUME;
-static volatile bool    display_dirty = true;
+static volatile int     volume     = VOLUME_MAX / 4;
+static volatile uint8_t preset_idx = 0;
+static volatile uint8_t ui_mode    = MODE_VOLUME;
 
 struct Voice {
     volatile uint32_t phase;
@@ -187,6 +175,7 @@ static void note_on(int note)
 
     voices[v].note      = (int8_t)note;
     voices[v].phase_inc = hz_to_inc(button_hz[note]);
+    voices[v].env_level = 0;
     voices[v].env_stage = ENV_ATTACK;
     voices[v].age       = ++voice_age_counter;
 }
@@ -199,9 +188,6 @@ static void note_off(int note)
     voices[v].note      = -1;
 }
 
-// ---------------------------------------------------------------------------
-// I2S ISR
-// ---------------------------------------------------------------------------
 extern "C" void I2S_Handler(void)
 {
     if (!(I2S->INTFLAG.bit.TXRDY1))
@@ -227,7 +213,13 @@ extern "C" void I2S_Handler(void)
                 el -= adsr->decay;
                 if (el <= adsr->sustain) {
                     el = adsr->sustain;
-                    v->env_stage = (adsr->sustain > 0) ? ENV_SUSTAIN : ENV_RELEASE;
+                    if (adsr->sustain > 0)
+                        v->env_stage = ENV_SUSTAIN;
+                    else {
+                        v->env_stage = ENV_IDLE;
+                        v->phase_inc = 0;
+                        el = 0;
+                    }
                 }
                 break;
             case ENV_SUSTAIN:
@@ -270,7 +262,6 @@ extern "C" void I2S_Handler(void)
     }
 }
 
-// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -288,9 +279,9 @@ static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
     delay(150);
 }
 
-// Encoder A/B + push
 static uint8_t enc_prev = 0;
-static bool    sw_prev  = true;  // pull-up, idle high
+static bool    sw_prev  = true;
+static int8_t  preset_accum = 0;
 
 static void encoder_init(void)
 {
@@ -327,19 +318,28 @@ static bool encoder_poll(void)
             if (v < 0)          v = 0;
             if (v > VOLUME_MAX) v = VOLUME_MAX;
             volume = v;
+            changed = true;
         } else {
-            int p = (int)preset_idx + delta;
-            if (p < 0)              p = 0;
-            if (p >= NUM_PRESETS)   p = NUM_PRESETS - 1;
-            preset_idx = (uint8_t)p;
+            // Accumulate edges; one preset step per detent
+            preset_accum += delta;
+            if (preset_accum >= PRESET_EDGES || preset_accum <= -PRESET_EDGES) {
+                int step = (preset_accum > 0) ? 1 : -1;
+                preset_accum = 0;
+                int p = (int)preset_idx + step;
+                if (p < 0)            p = 0;
+                if (p >= NUM_PRESETS) p = NUM_PRESETS - 1;
+                if (p != (int)preset_idx) {
+                    preset_idx = (uint8_t)p;
+                    changed = true;
+                }
+            }
         }
-        changed = true;
     }
 
-    // Push switch: active low, simple debounce via edge
     bool sw = (in & PORT_PA22) != 0;
     if (sw_prev && !sw) {
         ui_mode = (ui_mode == MODE_VOLUME) ? MODE_PRESET : MODE_VOLUME;
+        preset_accum = 0;
         changed = true;
     }
     sw_prev = sw;
@@ -347,7 +347,6 @@ static bool encoder_poll(void)
     return changed;
 }
 
-// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
