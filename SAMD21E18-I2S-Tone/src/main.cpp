@@ -1,25 +1,24 @@
 /*
  * ATSAMD21E18A → MAX98357A
- * Clean-tone pass: minimize I2S jitter, then re-calibrate pitch later.
+ * Clean I2S path + working volume encoder
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
- * Encoder: PA14/PA15 volume
- * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
+ * Encoder: PA14/PA15 volume (polled every sample)
+ * TM1638:  PA16=STB  PA18=CLK  PA19=DIO (~20 ms)
  *
- * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6  (pitch approximate until calibrated)
+ * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
+ * Measured: S1=523 Hz exact, S8≈1068 Hz (close)
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-// Nominal from 48 MHz / 16 / 64 — pitch cal comes after tone is clean
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 
-// Low peak → less amp harshness while debugging purity
 static constexpr int32_t SINE_PEAK = 300000000;
 
 static constexpr int32_t ENV_ATTACK  = 256;
@@ -61,7 +60,6 @@ static void sine_table_init(void)
     }
 }
 
-// 10-bit index + 10-bit fraction
 static int32_t sine_lookup(uint32_t ph)
 {
     uint32_t idx  = ph >> 22;
@@ -113,6 +111,7 @@ static void encoder_init(void)
     enc_prev = ((in & PORT_PA14) ? 1 : 0) | ((in & PORT_PA15) ? 2 : 0);
 }
 
+// Cheap GPIO read — safe every sample so no detents are missed
 static void encoder_poll(void)
 {
     static const int8_t table[16] = {
@@ -353,7 +352,6 @@ static void configure_i2s(void)
         I2S_CLKCTRL_MCKEN |
         I2S_CLKCTRL_MCKDIV(15);
 
-    // TXSAME off: underruns → silence instead of stretched samples (less buzz)
     I2S->SERCTRL[1].reg =
         I2S_SERCTRL_SERMODE_TX |
         I2S_SERCTRL_SLOTADJ_LEFT |
@@ -397,13 +395,11 @@ void setup()
 
 void loop()
 {
-    static uint32_t sample_count = 0;
     static uint32_t slow_div = 0;
 
-    /*
-     * Hot path only: envelope, sine, volume, I2S.
-     * Everything slow runs ~every 20 ms so the sample clock stays steady.
-     */
+    // Encoder is cheap — every sample so detents are never missed
+    encoder_poll();
+
     env_tick();
 
     int32_t raw = sine_lookup(phase);
@@ -416,12 +412,10 @@ void loop()
     if (!gate_on && env_level == 0)
         phase_inc = 0;
 
+    // TM1638 stays rare (~20 ms) to protect audio quality
     if (++slow_div >= 1000) {
         slow_div = 0;
-        encoder_poll();
         tm_poll();
-        led_toggle();   // ~23 Hz blink while running — shows loop is alive
+        led_toggle();
     }
-
-    (void)sample_count;
 }
