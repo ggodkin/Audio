@@ -9,16 +9,15 @@
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  *
- * Pitch calibration (iPhone spectrum):
- *   Programmed S1 = 523 Hz, measured = 589 Hz → ratio 589/523
- *   SAMPLE_RATE_HZ = 46875 * 589 / 523 ≈ 52801
+ * Pitch: last S1 measured 389 Hz at SAMPLE_RATE 52801 (target 523).
+ * New SAMPLE_RATE = 52801 * 389 / 523 ≈ 39279
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-static constexpr uint32_t SAMPLE_RATE_HZ = 52801;  // calibrated
+static constexpr uint32_t SAMPLE_RATE_HZ = 39279;
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
