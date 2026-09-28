@@ -19,7 +19,7 @@
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
-static constexpr int      VOLUME_STEP    = 2;
+static constexpr int      VOLUME_STEP    = 1;   // per quadrature edge
 
 static constexpr int32_t SINE_PEAK = 300000000;
 
@@ -35,11 +35,10 @@ static const uint16_t button_hz[8] = {
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
-// 7-segment patterns (gfedcba)
 static const uint8_t SEG_DIGIT[10] = {
     0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
 };
-static constexpr uint8_t SEG_V     = 0x3E;  // looks like U/V
+static constexpr uint8_t SEG_V     = 0x3E;
 static constexpr uint8_t SEG_O     = 0x3F;
 static constexpr uint8_t SEG_L     = 0x38;
 static constexpr uint8_t SEG_BLANK = 0x00;
@@ -172,9 +171,6 @@ static bool encoder_poll(void)
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// TM1638
-// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
@@ -241,7 +237,6 @@ static void tm_cmd(uint8_t cmd)
 
 static void tm_write_digit(uint8_t pos, uint8_t seg)
 {
-    // Digit positions 0..7 → addresses 0xC0, 0xC2, … 0xCE
     tm_stb_low();
     tm_write_byte(0xC0 + (pos * 2));
     tm_write_byte(seg);
@@ -250,13 +245,11 @@ static void tm_write_digit(uint8_t pos, uint8_t seg)
 
 static void tm_show_volume(int vol)
 {
-    // Digits 0–3: V O L blank
     tm_write_digit(0, SEG_V);
     tm_write_digit(1, SEG_O);
     tm_write_digit(2, SEG_L);
     tm_write_digit(3, SEG_BLANK);
 
-    // Digits 4–7: right-aligned volume (0–64)
     if (vol < 0) vol = 0;
     if (vol > 9999) vol = 9999;
 
@@ -276,8 +269,8 @@ static void tm_init(void)
     tm_clk_high();
     tm_dio_write(true);
 
-    tm_cmd(0x8F);   // display on, bright
-    tm_cmd(0x40);   // auto-increment (still use fixed addr writes)
+    tm_cmd(0x8F);
+    tm_cmd(0x40);
 
     tm_stb_low();
     tm_write_byte(0xC0);
