@@ -1,12 +1,13 @@
 /*
  * ATSAMD21E18A → MAX98357A
  *
- * Audio in I2S TXRDY ISR; keys/encoder in main loop.
+ * Audio in I2S TXRDY ISR; keys/encoder/display in main loop.
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
+ * Display: digits 1–4 "VOL "  digits 5–8 volume 0–64
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  */
@@ -18,7 +19,7 @@
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
-static constexpr int      VOLUME_STEP    = 2;   // per encoder detent
+static constexpr int      VOLUME_STEP    = 2;
 
 static constexpr int32_t SINE_PEAK = 300000000;
 
@@ -34,10 +35,19 @@ static const uint16_t button_hz[8] = {
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
+// 7-segment patterns (gfedcba)
+static const uint8_t SEG_DIGIT[10] = {
+    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+};
+static constexpr uint8_t SEG_V     = 0x3E;  // looks like U/V
+static constexpr uint8_t SEG_O     = 0x3F;
+static constexpr uint8_t SEG_L     = 0x38;
+static constexpr uint8_t SEG_BLANK = 0x00;
+
 static volatile uint32_t phase     = 0;
 static volatile uint32_t phase_inc = 0;
 
-static volatile int volume = VOLUME_MAX / 4;  // start 25%
+static volatile int volume = VOLUME_MAX / 4;
 static volatile bool gate_on = false;
 static volatile int  active_btn = -1;
 
@@ -115,7 +125,6 @@ static void led_init(void)
 }
 static void led_on(void)     { PORT->Group[0].OUTSET.reg = PORT_PA17; }
 static void led_off(void)    { PORT->Group[0].OUTCLR.reg = PORT_PA17; }
-static void led_toggle(void) { PORT->Group[0].OUTTGL.reg = PORT_PA17; }
 
 static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
 {
@@ -139,7 +148,7 @@ static void encoder_init(void)
     enc_prev = ((in & PORT_PA14) ? 1 : 0) | ((in & PORT_PA15) ? 2 : 0);
 }
 
-static void encoder_poll(void)
+static bool encoder_poll(void)
 {
     static const int8_t table[16] = {
          0, -1,  1,  0,
@@ -158,9 +167,14 @@ static void encoder_poll(void)
         if (v < 0)          v = 0;
         if (v > VOLUME_MAX) v = VOLUME_MAX;
         volume = v;
+        return true;
     }
+    return false;
 }
 
+// ---------------------------------------------------------------------------
+// TM1638
+// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
@@ -225,6 +239,33 @@ static void tm_cmd(uint8_t cmd)
     tm_stb_high();
 }
 
+static void tm_write_digit(uint8_t pos, uint8_t seg)
+{
+    // Digit positions 0..7 → addresses 0xC0, 0xC2, … 0xCE
+    tm_stb_low();
+    tm_write_byte(0xC0 + (pos * 2));
+    tm_write_byte(seg);
+    tm_stb_high();
+}
+
+static void tm_show_volume(int vol)
+{
+    // Digits 0–3: V O L blank
+    tm_write_digit(0, SEG_V);
+    tm_write_digit(1, SEG_O);
+    tm_write_digit(2, SEG_L);
+    tm_write_digit(3, SEG_BLANK);
+
+    // Digits 4–7: right-aligned volume (0–64)
+    if (vol < 0) vol = 0;
+    if (vol > 9999) vol = 9999;
+
+    tm_write_digit(4, (vol >= 1000) ? SEG_DIGIT[(vol / 1000) % 10] : SEG_BLANK);
+    tm_write_digit(5, (vol >= 100)  ? SEG_DIGIT[(vol / 100) % 10]  : SEG_BLANK);
+    tm_write_digit(6, (vol >= 10)   ? SEG_DIGIT[(vol / 10) % 10]   : SEG_BLANK);
+    tm_write_digit(7, SEG_DIGIT[vol % 10]);
+}
+
 static void tm_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA16 | PORT_PA18 | PORT_PA19;
@@ -235,14 +276,16 @@ static void tm_init(void)
     tm_clk_high();
     tm_dio_write(true);
 
-    tm_cmd(0x8F);
-    tm_cmd(0x40);
+    tm_cmd(0x8F);   // display on, bright
+    tm_cmd(0x40);   // auto-increment (still use fixed addr writes)
 
     tm_stb_low();
     tm_write_byte(0xC0);
     for (int i = 0; i < 16; i++)
         tm_write_byte(0x00);
     tm_stb_high();
+
+    tm_show_volume(volume);
 }
 
 static void tm_set_leds(uint8_t note_mask)
@@ -420,10 +463,20 @@ void setup()
 
 void loop()
 {
-    // Poll encoder hard between TM1638 scans so no detent is missed
+    static int last_vol = -1;
+    bool changed = false;
+
     for (int i = 0; i < 40; i++) {
-        encoder_poll();
+        if (encoder_poll())
+            changed = true;
         delayMicroseconds(200);
     }
+
     tm_poll();
+
+    int v = volume;
+    if (changed || v != last_vol) {
+        tm_show_volume(v);
+        last_vol = v;
+    }
 }
