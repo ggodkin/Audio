@@ -1,16 +1,18 @@
 /*
- * ATSAMD21E18A → MAX98357A – 4-voice polyphonic sine
+ * ATSAMD21E18A → MAX98357A – 4-voice + ADSR presets
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
- * Encoder: PA14/PA15 volume
+ * Encoder: PA14/PA15 = A/B   PA22 = push (mode toggle)
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
- * Display: "VOL " + level 0–64
+ *
+ * Display left 4: VOL / ORG / PLK / PAD / BRS
+ * Display right 4: volume 0–64 or preset index 1–4
+ *
+ * Encoder push: toggle volume ↔ preset select
+ * Encoder turn: adjust volume or change preset
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
- *
- * Pitch cal (spectrum, all notes ~0.68× low):
- *   S1 measured 355 vs 523 → SAMPLE_RATE = 46875 * 355/523 ≈ 31815
  */
 
 #include <Arduino.h>
@@ -22,12 +24,10 @@ static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
 static constexpr int      NUM_VOICES     = 4;
+static constexpr int      NUM_PRESETS    = 4;
 
 static constexpr int32_t SINE_PEAK = 280000000;
-
-static constexpr int32_t ENV_ATTACK  = 256;
-static constexpr int32_t ENV_RELEASE = 128;
-static constexpr int32_t ENV_ONE     = 65536;
+static constexpr int32_t ENV_ONE   = 65536;
 
 static int32_t sine_table[SINE_LEN];
 
@@ -37,27 +37,78 @@ static const uint16_t button_hz[8] = {
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
+// 7-segment (gfedcba)
 static const uint8_t SEG_DIGIT[10] = {
     0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
 };
-static constexpr uint8_t SEG_V     = 0x3E;
-static constexpr uint8_t SEG_O     = 0x3F;
-static constexpr uint8_t SEG_L     = 0x38;
 static constexpr uint8_t SEG_BLANK = 0x00;
+static constexpr uint8_t SEG_A = 0x77;
+static constexpr uint8_t SEG_B = 0x7C;
+static constexpr uint8_t SEG_C = 0x39;
+static constexpr uint8_t SEG_D = 0x5E;
+static constexpr uint8_t SEG_E = 0x79;
+static constexpr uint8_t SEG_F = 0x71;
+static constexpr uint8_t SEG_G = 0x3D;
+static constexpr uint8_t SEG_H = 0x76;
+static constexpr uint8_t SEG_I = 0x30;
+static constexpr uint8_t SEG_J = 0x1E;
+static constexpr uint8_t SEG_K = 0x75;
+static constexpr uint8_t SEG_L = 0x38;
+static constexpr uint8_t SEG_M = 0x37;
+static constexpr uint8_t SEG_N = 0x54;
+static constexpr uint8_t SEG_O = 0x3F;
+static constexpr uint8_t SEG_P = 0x73;
+static constexpr uint8_t SEG_R = 0x50;
+static constexpr uint8_t SEG_S = 0x6D;
+static constexpr uint8_t SEG_T = 0x78;
+static constexpr uint8_t SEG_U = 0x3E;
+static constexpr uint8_t SEG_V = 0x3E;
+static constexpr uint8_t SEG_Y = 0x6E;
+
+// ---------------------------------------------------------------------------
+// ADSR presets
+// Rates are added/subtracted each sample at ~31.8 kHz effective frame rate.
+// Larger rate = faster stage.
+// ---------------------------------------------------------------------------
+enum EnvStage : uint8_t { ENV_IDLE = 0, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
+
+struct Adsr {
+    int32_t attack;    // per sample toward ENV_ONE
+    int32_t decay;     // per sample toward sustain
+    int32_t sustain;   // 0…ENV_ONE
+    int32_t release;   // per sample toward 0
+    uint8_t label[4];  // 7-seg chars for left display
+};
+
+// ORG  – organ: fast attack, full sustain, medium release
+// PLK  – pluck: instant attack, fast decay to 0, short release
+// PAD  – pad:   slow attack, high sustain, long release
+// BRS  – brass: medium attack, slight decay, high sustain
+static const Adsr PRESETS[NUM_PRESETS] = {
+    { 512,  256, ENV_ONE,          128, { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
+    { 2048,  64, 0,                 96, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
+    {  48,   32, (ENV_ONE * 7) / 8, 24, { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
+    { 128,   80, (ENV_ONE * 3) / 4, 80, { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
+};
+
+enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
+
+static volatile int     volume       = VOLUME_MAX / 4;
+static volatile uint8_t preset_idx   = 0;
+static volatile uint8_t ui_mode      = MODE_VOLUME;
+static volatile bool    display_dirty = true;
 
 struct Voice {
     volatile uint32_t phase;
     volatile uint32_t phase_inc;
     volatile int32_t  env_level;
-    volatile int32_t  env_target;
+    volatile uint8_t  env_stage;
     volatile int8_t   note;
     volatile uint32_t age;
 };
 
 static Voice voices[NUM_VOICES];
 static volatile uint32_t voice_age_counter = 0;
-
-static volatile int volume = VOLUME_MAX / 4;
 
 static volatile uint8_t i2s_slot = 0;
 static volatile int32_t i2s_hold = 0;
@@ -87,12 +138,12 @@ static uint32_t hz_to_inc(uint16_t hz)
 static void voices_init(void)
 {
     for (int i = 0; i < NUM_VOICES; i++) {
-        voices[i].phase      = 0;
-        voices[i].phase_inc  = 0;
-        voices[i].env_level  = 0;
-        voices[i].env_target = 0;
-        voices[i].note       = -1;
-        voices[i].age        = 0;
+        voices[i].phase     = 0;
+        voices[i].phase_inc = 0;
+        voices[i].env_level = 0;
+        voices[i].env_stage = ENV_IDLE;
+        voices[i].note      = -1;
+        voices[i].age       = 0;
     }
 }
 
@@ -108,7 +159,7 @@ static int find_voice_for_note(int note)
 static int alloc_voice(void)
 {
     for (int i = 0; i < NUM_VOICES; i++) {
-        if (voices[i].note < 0 && voices[i].env_level == 0)
+        if (voices[i].note < 0 && voices[i].env_stage == ENV_IDLE)
             return i;
     }
     for (int i = 0; i < NUM_VOICES; i++) {
@@ -134,46 +185,70 @@ static void note_on(int note)
     if (v < 0)
         v = alloc_voice();
 
-    voices[v].note       = (int8_t)note;
-    voices[v].phase_inc  = hz_to_inc(button_hz[note]);
-    voices[v].env_target = ENV_ONE;
-    voices[v].age        = ++voice_age_counter;
+    voices[v].note      = (int8_t)note;
+    voices[v].phase_inc = hz_to_inc(button_hz[note]);
+    voices[v].env_stage = ENV_ATTACK;
+    voices[v].age       = ++voice_age_counter;
 }
 
 static void note_off(int note)
 {
     int v = find_voice_for_note(note);
     if (v < 0) return;
-    voices[v].env_target = 0;
-    voices[v].note       = -1;
+    voices[v].env_stage = ENV_RELEASE;
+    voices[v].note      = -1;
 }
 
+// ---------------------------------------------------------------------------
+// I2S ISR
+// ---------------------------------------------------------------------------
 extern "C" void I2S_Handler(void)
 {
     if (!(I2S->INTFLAG.bit.TXRDY1))
         return;
 
     if (i2s_slot == 0) {
+        const Adsr *adsr = &PRESETS[preset_idx];
         int64_t mix = 0;
 
         for (int i = 0; i < NUM_VOICES; i++) {
             Voice *v = &voices[i];
-
             int32_t el = v->env_level;
-            int32_t et = v->env_target;
-            if (el < et) {
-                el += ENV_ATTACK;
-                if (el > et) el = et;
-            } else if (el > et) {
-                el -= ENV_RELEASE;
-                if (el < et) el = et;
+
+            switch (v->env_stage) {
+            case ENV_ATTACK:
+                el += adsr->attack;
+                if (el >= ENV_ONE) {
+                    el = ENV_ONE;
+                    v->env_stage = ENV_DECAY;
+                }
+                break;
+            case ENV_DECAY:
+                el -= adsr->decay;
+                if (el <= adsr->sustain) {
+                    el = adsr->sustain;
+                    v->env_stage = (adsr->sustain > 0) ? ENV_SUSTAIN : ENV_RELEASE;
+                }
+                break;
+            case ENV_SUSTAIN:
+                el = adsr->sustain;
+                break;
+            case ENV_RELEASE:
+                el -= adsr->release;
+                if (el <= 0) {
+                    el = 0;
+                    v->env_stage = ENV_IDLE;
+                    v->phase_inc = 0;
+                }
+                break;
+            default:
+                el = 0;
+                break;
             }
             v->env_level = el;
 
-            if (el == 0) {
-                v->phase_inc = 0;
+            if (el == 0)
                 continue;
-            }
 
             int32_t raw = sine_lookup(v->phase);
             mix += ((int64_t)raw * el) >> 16;
@@ -195,6 +270,7 @@ extern "C" void I2S_Handler(void)
     }
 }
 
+// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -212,17 +288,21 @@ static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
     delay(150);
 }
 
+// Encoder A/B + push
 static uint8_t enc_prev = 0;
+static bool    sw_prev  = true;  // pull-up, idle high
 
 static void encoder_init(void)
 {
-    PORT->Group[0].DIRCLR.reg = PORT_PA14 | PORT_PA15;
+    PORT->Group[0].DIRCLR.reg = PORT_PA14 | PORT_PA15 | PORT_PA22;
     PORT->Group[0].PINCFG[14].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
     PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
-    PORT->Group[0].OUTSET.reg = PORT_PA14 | PORT_PA15;
+    PORT->Group[0].PINCFG[22].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+    PORT->Group[0].OUTSET.reg = PORT_PA14 | PORT_PA15 | PORT_PA22;
 
     uint32_t in = PORT->Group[0].IN.reg;
     enc_prev = ((in & PORT_PA14) ? 1 : 0) | ((in & PORT_PA15) ? 2 : 0);
+    sw_prev  = (in & PORT_PA22) != 0;
 }
 
 static bool encoder_poll(void)
@@ -239,16 +319,35 @@ static bool encoder_poll(void)
     int8_t delta = table[(enc_prev << 2) | curr];
     enc_prev = curr;
 
+    bool changed = false;
+
     if (delta) {
-        int v = volume + delta * VOLUME_STEP;
-        if (v < 0)          v = 0;
-        if (v > VOLUME_MAX) v = VOLUME_MAX;
-        volume = v;
-        return true;
+        if (ui_mode == MODE_VOLUME) {
+            int v = volume + delta * VOLUME_STEP;
+            if (v < 0)          v = 0;
+            if (v > VOLUME_MAX) v = VOLUME_MAX;
+            volume = v;
+        } else {
+            int p = (int)preset_idx + delta;
+            if (p < 0)              p = 0;
+            if (p >= NUM_PRESETS)   p = NUM_PRESETS - 1;
+            preset_idx = (uint8_t)p;
+        }
+        changed = true;
     }
-    return false;
+
+    // Push switch: active low, simple debounce via edge
+    bool sw = (in & PORT_PA22) != 0;
+    if (sw_prev && !sw) {
+        ui_mode = (ui_mode == MODE_VOLUME) ? MODE_PRESET : MODE_VOLUME;
+        changed = true;
+    }
+    sw_prev = sw;
+
+    return changed;
 }
 
+// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
@@ -321,20 +420,32 @@ static void tm_write_digit(uint8_t pos, uint8_t seg)
     tm_stb_high();
 }
 
-static void tm_show_volume(int vol)
+static void tm_show_ui(void)
 {
-    tm_write_digit(0, SEG_V);
-    tm_write_digit(1, SEG_O);
-    tm_write_digit(2, SEG_L);
-    tm_write_digit(3, SEG_BLANK);
+    if (ui_mode == MODE_VOLUME) {
+        tm_write_digit(0, SEG_V);
+        tm_write_digit(1, SEG_O);
+        tm_write_digit(2, SEG_L);
+        tm_write_digit(3, SEG_BLANK);
 
-    if (vol < 0) vol = 0;
-    if (vol > 9999) vol = 9999;
+        int vol = volume;
+        tm_write_digit(4, (vol >= 1000) ? SEG_DIGIT[(vol / 1000) % 10] : SEG_BLANK);
+        tm_write_digit(5, (vol >= 100)  ? SEG_DIGIT[(vol / 100) % 10]  : SEG_BLANK);
+        tm_write_digit(6, (vol >= 10)   ? SEG_DIGIT[(vol / 10) % 10]   : SEG_BLANK);
+        tm_write_digit(7, SEG_DIGIT[vol % 10]);
+    } else {
+        const uint8_t *lab = PRESETS[preset_idx].label;
+        tm_write_digit(0, lab[0]);
+        tm_write_digit(1, lab[1]);
+        tm_write_digit(2, lab[2]);
+        tm_write_digit(3, lab[3]);
 
-    tm_write_digit(4, (vol >= 1000) ? SEG_DIGIT[(vol / 1000) % 10] : SEG_BLANK);
-    tm_write_digit(5, (vol >= 100)  ? SEG_DIGIT[(vol / 100) % 10]  : SEG_BLANK);
-    tm_write_digit(6, (vol >= 10)   ? SEG_DIGIT[(vol / 10) % 10]   : SEG_BLANK);
-    tm_write_digit(7, SEG_DIGIT[vol % 10]);
+        int n = preset_idx + 1;
+        tm_write_digit(4, SEG_BLANK);
+        tm_write_digit(5, SEG_BLANK);
+        tm_write_digit(6, SEG_BLANK);
+        tm_write_digit(7, SEG_DIGIT[n % 10]);
+    }
 }
 
 static void tm_init(void)
@@ -356,7 +467,7 @@ static void tm_init(void)
         tm_write_byte(0x00);
     tm_stb_high();
 
-    tm_show_volume(volume);
+    tm_show_ui();
 }
 
 static void tm_set_leds(uint8_t note_mask)
@@ -504,7 +615,6 @@ void setup()
 
 void loop()
 {
-    static int last_vol = -1;
     bool changed = false;
 
     for (int i = 0; i < 40; i++) {
@@ -515,9 +625,6 @@ void loop()
 
     tm_poll();
 
-    int v = volume;
-    if (changed || v != last_vol) {
-        tm_show_volume(v);
-        last_vol = v;
-    }
+    if (changed)
+        tm_show_ui();
 }
