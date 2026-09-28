@@ -1,30 +1,29 @@
 /*
  * ATSAMD21E18A → MAX98357A
- * I2S sine + rotary volume + TM1638 LED&KEY
+ * Clean-tone pass: minimize I2S jitter, then re-calibrate pitch later.
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
- *
- * Pitch: at 50621, S1=554 (target 523), S8=959 (target 1047).
- * S1 is reliable at lower freq → SAMPLE_RATE *= 554/523 → 53622
+ * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6  (pitch approximate until calibrated)
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-static constexpr uint32_t SAMPLE_RATE_HZ = 53622;
-static constexpr uint32_t SINE_LEN       = 512;
+// Nominal from 48 MHz / 16 / 64 — pitch cal comes after tone is clean
+static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
+static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 
-static constexpr int32_t SINE_PEAK = 400000000;
+// Low peak → less amp harshness while debugging purity
+static constexpr int32_t SINE_PEAK = 300000000;
 
-static constexpr int32_t ENV_ATTACK  = 512;
-static constexpr int32_t ENV_RELEASE = 256;
+static constexpr int32_t ENV_ATTACK  = 256;
+static constexpr int32_t ENV_RELEASE = 128;
 static constexpr int32_t ENV_ONE     = 65536;
 
 static int32_t sine_table[SINE_LEN];
@@ -62,13 +61,14 @@ static void sine_table_init(void)
     }
 }
 
+// 10-bit index + 10-bit fraction
 static int32_t sine_lookup(uint32_t ph)
 {
-    uint32_t idx  = ph >> 23;
-    uint32_t frac = (ph >> 14) & 0x1FFu;
+    uint32_t idx  = ph >> 22;
+    uint32_t frac = (ph >> 12) & 0x3FFu;
     int32_t  s0   = sine_table[idx & (SINE_LEN - 1)];
     int32_t  s1   = sine_table[(idx + 1) & (SINE_LEN - 1)];
-    return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 9);
+    return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 10);
 }
 
 static void env_tick(void)
@@ -137,7 +137,7 @@ static void encoder_poll(void)
 
 static void tm_delay(void)
 {
-    for (volatile int i = 0; i < 12; i++) {}
+    for (volatile int i = 0; i < 8; i++) {}
 }
 
 static void tm_stb_low(void)  { PORT->Group[0].OUTCLR.reg = PORT_PA16; }
@@ -353,9 +353,9 @@ static void configure_i2s(void)
         I2S_CLKCTRL_MCKEN |
         I2S_CLKCTRL_MCKDIV(15);
 
+    // TXSAME off: underruns → silence instead of stretched samples (less buzz)
     I2S->SERCTRL[1].reg =
         I2S_SERCTRL_SERMODE_TX |
-        I2S_SERCTRL_TXSAME |
         I2S_SERCTRL_SLOTADJ_LEFT |
         I2S_SERCTRL_DATASIZE_32 |
         I2S_SERCTRL_CLKSEL_CLK0;
@@ -398,15 +398,12 @@ void setup()
 void loop()
 {
     static uint32_t sample_count = 0;
-    static uint32_t poll_div = 0;
+    static uint32_t slow_div = 0;
 
-    encoder_poll();
-
-    if (++poll_div >= 250) {
-        poll_div = 0;
-        tm_poll();
-    }
-
+    /*
+     * Hot path only: envelope, sine, volume, I2S.
+     * Everything slow runs ~every 20 ms so the sample clock stays steady.
+     */
     env_tick();
 
     int32_t raw = sine_lookup(phase);
@@ -414,14 +411,17 @@ void loop()
     sample = (int32_t)(((int64_t)sample * volume) / VOLUME_MAX);
 
     i2s_write_stereo(sample);
-
     phase += phase_inc;
 
     if (!gate_on && env_level == 0)
         phase_inc = 0;
 
-    if (++sample_count >= (SAMPLE_RATE_HZ / 2)) {
-        sample_count = 0;
-        led_toggle();
+    if (++slow_div >= 1000) {
+        slow_div = 0;
+        encoder_poll();
+        tm_poll();
+        led_toggle();   // ~23 Hz blink while running — shows loop is alive
     }
+
+    (void)sample_count;
 }
