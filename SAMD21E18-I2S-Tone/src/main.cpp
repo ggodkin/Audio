@@ -8,20 +8,22 @@
  * Display: "VOL " + level 0–64
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
- * Up to 4 keys at once; extra notes steal the oldest voice.
+ *
+ * Pitch cal (spectrum, all notes ~0.68× low):
+ *   S1 measured 355 vs 523 → SAMPLE_RATE = 46875 * 355/523 ≈ 31815
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
+static constexpr uint32_t SAMPLE_RATE_HZ = 31815;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
 static constexpr int      NUM_VOICES     = 4;
 
-static constexpr int32_t SINE_PEAK = 280000000;  // headroom for 4-voice mix
+static constexpr int32_t SINE_PEAK = 280000000;
 
 static constexpr int32_t ENV_ATTACK  = 256;
 static constexpr int32_t ENV_RELEASE = 128;
@@ -48,8 +50,8 @@ struct Voice {
     volatile uint32_t phase_inc;
     volatile int32_t  env_level;
     volatile int32_t  env_target;
-    volatile int8_t   note;      // 0…7 button index, -1 = free
-    volatile uint32_t age;       // for voice stealing
+    volatile int8_t   note;
+    volatile uint32_t age;
 };
 
 static Voice voices[NUM_VOICES];
@@ -105,17 +107,14 @@ static int find_voice_for_note(int note)
 
 static int alloc_voice(void)
 {
-    // Prefer free (fully released) voice
     for (int i = 0; i < NUM_VOICES; i++) {
         if (voices[i].note < 0 && voices[i].env_level == 0)
             return i;
     }
-    // Prefer any free note slot (still releasing)
     for (int i = 0; i < NUM_VOICES; i++) {
         if (voices[i].note < 0)
             return i;
     }
-    // Steal oldest
     int oldest = 0;
     uint32_t best = voices[0].age;
     for (int i = 1; i < NUM_VOICES; i++) {
@@ -131,7 +130,6 @@ static void note_on(int note)
 {
     if (note < 0 || note > 7) return;
 
-    // Already playing this note – re-attack
     int v = find_voice_for_note(note);
     if (v < 0)
         v = alloc_voice();
@@ -140,7 +138,6 @@ static void note_on(int note)
     voices[v].phase_inc  = hz_to_inc(button_hz[note]);
     voices[v].env_target = ENV_ONE;
     voices[v].age        = ++voice_age_counter;
-    // keep phase continuous on re-attack for less click
 }
 
 static void note_off(int note)
@@ -148,12 +145,9 @@ static void note_off(int note)
     int v = find_voice_for_note(note);
     if (v < 0) return;
     voices[v].env_target = 0;
-    voices[v].note       = -1;  // free for reuse after release finishes
+    voices[v].note       = -1;
 }
 
-// ---------------------------------------------------------------------------
-// I2S ISR – mix up to 4 voices
-// ---------------------------------------------------------------------------
 extern "C" void I2S_Handler(void)
 {
     if (!(I2S->INTFLAG.bit.TXRDY1))
@@ -186,7 +180,6 @@ extern "C" void I2S_Handler(void)
             v->phase += v->phase_inc;
         }
 
-        // Average voices so 4 keys ≈ same peak as 1
         mix /= NUM_VOICES;
         mix = (mix * volume) / VOLUME_MAX;
 
@@ -202,7 +195,6 @@ extern "C" void I2S_Handler(void)
     }
 }
 
-// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -257,7 +249,6 @@ static bool encoder_poll(void)
     return false;
 }
 
-// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
