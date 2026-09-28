@@ -1,15 +1,14 @@
 /*
- * ATSAMD21E18A → MAX98357A
- *
- * Audio in I2S TXRDY ISR; keys/encoder/display in main loop.
+ * ATSAMD21E18A → MAX98357A – 4-voice polyphonic sine
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
  * Encoder: PA14/PA15 volume
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
- * Display: digits 1–4 "VOL "  digits 5–8 volume 0–64
+ * Display: "VOL " + level 0–64
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
+ * Up to 4 keys at once; extra notes steal the oldest voice.
  */
 
 #include <Arduino.h>
@@ -19,9 +18,10 @@
 static constexpr uint32_t SAMPLE_RATE_HZ = 46875;
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
-static constexpr int      VOLUME_STEP    = 1;   // per quadrature edge
+static constexpr int      VOLUME_STEP    = 1;
+static constexpr int      NUM_VOICES     = 4;
 
-static constexpr int32_t SINE_PEAK = 300000000;
+static constexpr int32_t SINE_PEAK = 280000000;  // headroom for 4-voice mix
 
 static constexpr int32_t ENV_ATTACK  = 256;
 static constexpr int32_t ENV_RELEASE = 128;
@@ -43,27 +43,22 @@ static constexpr uint8_t SEG_O     = 0x3F;
 static constexpr uint8_t SEG_L     = 0x38;
 static constexpr uint8_t SEG_BLANK = 0x00;
 
-static volatile uint32_t phase     = 0;
-static volatile uint32_t phase_inc = 0;
+struct Voice {
+    volatile uint32_t phase;
+    volatile uint32_t phase_inc;
+    volatile int32_t  env_level;
+    volatile int32_t  env_target;
+    volatile int8_t   note;      // 0…7 button index, -1 = free
+    volatile uint32_t age;       // for voice stealing
+};
+
+static Voice voices[NUM_VOICES];
+static volatile uint32_t voice_age_counter = 0;
 
 static volatile int volume = VOLUME_MAX / 4;
-static volatile bool gate_on = false;
-static volatile int  active_btn = -1;
-
-static volatile int32_t env_level  = 0;
-static volatile int32_t env_target = 0;
 
 static volatile uint8_t i2s_slot = 0;
 static volatile int32_t i2s_hold = 0;
-
-static void set_freq_hz(uint16_t hz)
-{
-    if (hz == 0) {
-        phase_inc = 0;
-        return;
-    }
-    phase_inc = (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
-}
 
 static void sine_table_init(void)
 {
@@ -82,34 +77,124 @@ static int32_t sine_lookup(uint32_t ph)
     return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 10);
 }
 
+static uint32_t hz_to_inc(uint16_t hz)
+{
+    return (uint32_t)(((uint64_t)hz << 32) / SAMPLE_RATE_HZ);
+}
+
+static void voices_init(void)
+{
+    for (int i = 0; i < NUM_VOICES; i++) {
+        voices[i].phase      = 0;
+        voices[i].phase_inc  = 0;
+        voices[i].env_level  = 0;
+        voices[i].env_target = 0;
+        voices[i].note       = -1;
+        voices[i].age        = 0;
+    }
+}
+
+static int find_voice_for_note(int note)
+{
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (voices[i].note == note)
+            return i;
+    }
+    return -1;
+}
+
+static int alloc_voice(void)
+{
+    // Prefer free (fully released) voice
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (voices[i].note < 0 && voices[i].env_level == 0)
+            return i;
+    }
+    // Prefer any free note slot (still releasing)
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (voices[i].note < 0)
+            return i;
+    }
+    // Steal oldest
+    int oldest = 0;
+    uint32_t best = voices[0].age;
+    for (int i = 1; i < NUM_VOICES; i++) {
+        if (voices[i].age < best) {
+            best = voices[i].age;
+            oldest = i;
+        }
+    }
+    return oldest;
+}
+
+static void note_on(int note)
+{
+    if (note < 0 || note > 7) return;
+
+    // Already playing this note – re-attack
+    int v = find_voice_for_note(note);
+    if (v < 0)
+        v = alloc_voice();
+
+    voices[v].note       = (int8_t)note;
+    voices[v].phase_inc  = hz_to_inc(button_hz[note]);
+    voices[v].env_target = ENV_ONE;
+    voices[v].age        = ++voice_age_counter;
+    // keep phase continuous on re-attack for less click
+}
+
+static void note_off(int note)
+{
+    int v = find_voice_for_note(note);
+    if (v < 0) return;
+    voices[v].env_target = 0;
+    voices[v].note       = -1;  // free for reuse after release finishes
+}
+
+// ---------------------------------------------------------------------------
+// I2S ISR – mix up to 4 voices
+// ---------------------------------------------------------------------------
 extern "C" void I2S_Handler(void)
 {
     if (!(I2S->INTFLAG.bit.TXRDY1))
         return;
 
     if (i2s_slot == 0) {
-        int32_t el = env_level;
-        int32_t et = env_target;
-        if (el < et) {
-            el += ENV_ATTACK;
-            if (el > et) el = et;
-        } else if (el > et) {
-            el -= ENV_RELEASE;
-            if (el < et) el = et;
+        int64_t mix = 0;
+
+        for (int i = 0; i < NUM_VOICES; i++) {
+            Voice *v = &voices[i];
+
+            int32_t el = v->env_level;
+            int32_t et = v->env_target;
+            if (el < et) {
+                el += ENV_ATTACK;
+                if (el > et) el = et;
+            } else if (el > et) {
+                el -= ENV_RELEASE;
+                if (el < et) el = et;
+            }
+            v->env_level = el;
+
+            if (el == 0) {
+                v->phase_inc = 0;
+                continue;
+            }
+
+            int32_t raw = sine_lookup(v->phase);
+            mix += ((int64_t)raw * el) >> 16;
+            v->phase += v->phase_inc;
         }
-        env_level = el;
 
-        int32_t raw = sine_lookup(phase);
-        int32_t s = (int32_t)(((int64_t)raw * el) >> 16);
-        s = (int32_t)(((int64_t)s * volume) / VOLUME_MAX);
-        i2s_hold = s;
+        // Average voices so 4 keys ≈ same peak as 1
+        mix /= NUM_VOICES;
+        mix = (mix * volume) / VOLUME_MAX;
 
-        phase += phase_inc;
+        if (mix >  2147483647LL) mix =  2147483647LL;
+        if (mix < -2147483648LL) mix = -2147483648LL;
 
-        if (!gate_on && el == 0)
-            phase_inc = 0;
-
-        I2S->DATA[1].reg = (uint32_t)s;
+        i2s_hold = (int32_t)mix;
+        I2S->DATA[1].reg = (uint32_t)(int32_t)mix;
         i2s_slot = 1;
     } else {
         I2S->DATA[1].reg = (uint32_t)i2s_hold;
@@ -117,13 +202,14 @@ extern "C" void I2S_Handler(void)
     }
 }
 
+// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
     PORT->Group[0].OUTCLR.reg = PORT_PA17;
 }
-static void led_on(void)     { PORT->Group[0].OUTSET.reg = PORT_PA17; }
-static void led_off(void)    { PORT->Group[0].OUTCLR.reg = PORT_PA17; }
+static void led_on(void)  { PORT->Group[0].OUTSET.reg = PORT_PA17; }
+static void led_off(void) { PORT->Group[0].OUTCLR.reg = PORT_PA17; }
 
 static void led_blink_n(int n, uint16_t on_ms = 80, uint16_t off_ms = 80)
 {
@@ -171,6 +257,7 @@ static bool encoder_poll(void)
     return false;
 }
 
+// ---------------------------------------------------------------------------
 static void tm_delay(void)
 {
     for (volatile int i = 0; i < 8; i++) {}
@@ -324,21 +411,6 @@ static uint8_t keys_physical(uint8_t raw)
     return m;
 }
 
-static void note_on_btn(int i)
-{
-    active_btn = i;
-    gate_on = true;
-    set_freq_hz(button_hz[i]);
-    env_target = ENV_ONE;
-}
-
-static void note_off_all(void)
-{
-    active_btn = -1;
-    gate_on = false;
-    env_target = 0;
-}
-
 static void tm_poll(void)
 {
     static uint8_t prev = 0;
@@ -346,26 +418,11 @@ static void tm_poll(void)
     uint8_t pressed  = keys & ~prev;
     uint8_t released = prev & ~keys;
 
-    if (pressed) {
-        for (int i = 0; i < 8; i++) {
-            if (pressed & (1u << i)) {
-                note_on_btn(i);
-                break;
-            }
-        }
-    }
-
-    if (released && active_btn >= 0 && (released & (1u << active_btn))) {
-        if (keys) {
-            for (int i = 0; i < 8; i++) {
-                if (keys & (1u << i)) {
-                    note_on_btn(i);
-                    break;
-                }
-            }
-        } else {
-            note_off_all();
-        }
+    for (int i = 0; i < 8; i++) {
+        if (pressed & (1u << i))
+            note_on(i);
+        if (released & (1u << i))
+            note_off(i);
     }
 
     tm_set_leds(keys);
@@ -444,10 +501,10 @@ void setup()
     led_blink_n(3, 50, 50);
 
     sine_table_init();
+    voices_init();
     encoder_init();
     tm_init();
 
-    phase_inc = 0;
     configure_i2s();
 
     led_on();
