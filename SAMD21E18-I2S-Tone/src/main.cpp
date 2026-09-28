@@ -1,14 +1,15 @@
 /*
  * ATSAMD21E18A → MAX98357A
- * Clean I2S path + working volume encoder
+ *
+ * Audio runs in I2S TXRDY interrupt so TM1638/encoder in main loop
+ * cannot gap the sample stream (that caused ~47 Hz AM under the tone).
  *
  * I2S:     PA08=DIN  PA10=BCLK  PA11=LRCLK
  * LED:     PA17
- * Encoder: PA14/PA15 volume (polled every sample)
- * TM1638:  PA16=STB  PA18=CLK  PA19=DIO (~20 ms)
+ * Encoder: PA14/PA15 volume
+ * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
- * Measured: S1=523 Hz exact, S8≈1068 Hz (close)
  */
 
 #include <Arduino.h>
@@ -33,15 +34,19 @@ static const uint16_t button_hz[8] = {
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
-static uint32_t phase     = 0;
-static uint32_t phase_inc = 0;
+static volatile uint32_t phase     = 0;
+static volatile uint32_t phase_inc = 0;
 
 static volatile int volume = VOLUME_MAX / 32;
-static bool gate_on = false;
-static int  active_btn = -1;
+static volatile bool gate_on = false;
+static volatile int  active_btn = -1;
 
-static int32_t env_level  = 0;
-static int32_t env_target = 0;
+static volatile int32_t env_level  = 0;
+static volatile int32_t env_target = 0;
+
+// ISR writes L then R on alternate TXRDY events
+static volatile uint8_t i2s_slot = 0;
+static volatile int32_t i2s_hold = 0;
 
 static void set_freq_hz(uint16_t hz)
 {
@@ -69,17 +74,47 @@ static int32_t sine_lookup(uint32_t ph)
     return s0 + (int32_t)(((int64_t)(s1 - s0) * frac) >> 10);
 }
 
-static void env_tick(void)
+// ---------------------------------------------------------------------------
+// I2S TX interrupt – one stereo frame = two TXRDY events
+// ---------------------------------------------------------------------------
+extern "C" void I2S_Handler(void)
 {
-    if (env_level < env_target) {
-        env_level += ENV_ATTACK;
-        if (env_level > env_target) env_level = env_target;
-    } else if (env_level > env_target) {
-        env_level -= ENV_RELEASE;
-        if (env_level < env_target) env_level = env_target;
+    if (!(I2S->INTFLAG.bit.TXRDY1))
+        return;
+
+    // Clear by writing DATA (TXRDY clears on write)
+    if (i2s_slot == 0) {
+        // Start of frame: compute one sample for L and R
+        int32_t el = env_level;
+        int32_t et = env_target;
+        if (el < et) {
+            el += ENV_ATTACK;
+            if (el > et) el = et;
+        } else if (el > et) {
+            el -= ENV_RELEASE;
+            if (el < et) el = et;
+        }
+        env_level = el;
+
+        int32_t raw = sine_lookup(phase);
+        int32_t s = (int32_t)(((int64_t)raw * el) >> 16);
+        s = (int32_t)(((int64_t)s * volume) / VOLUME_MAX);
+        i2s_hold = s;
+
+        phase += phase_inc;
+
+        if (!gate_on && el == 0)
+            phase_inc = 0;
+
+        I2S->DATA[1].reg = (uint32_t)s;
+        i2s_slot = 1;
+    } else {
+        I2S->DATA[1].reg = (uint32_t)i2s_hold;
+        i2s_slot = 0;
     }
 }
 
+// ---------------------------------------------------------------------------
 static void led_init(void)
 {
     PORT->Group[0].DIRSET.reg = PORT_PA17;
@@ -111,7 +146,6 @@ static void encoder_init(void)
     enc_prev = ((in & PORT_PA14) ? 1 : 0) | ((in & PORT_PA15) ? 2 : 0);
 }
 
-// Cheap GPIO read — safe every sample so no detents are missed
 static void encoder_poll(void)
 {
     static const int8_t table[16] = {
@@ -358,6 +392,11 @@ static void configure_i2s(void)
         I2S_SERCTRL_DATASIZE_32 |
         I2S_SERCTRL_CLKSEL_CLK0;
 
+    // Enable TXRDY1 interrupt before enabling serializer
+    I2S->INTENSET.reg = I2S_INTENSET_TXRDY1;
+    NVIC_SetPriority(I2S_IRQn, 0);
+    NVIC_EnableIRQ(I2S_IRQn);
+
     I2S->CTRLA.reg =
         I2S_CTRLA_ENABLE |
         I2S_CTRLA_CKEN0  |
@@ -366,15 +405,10 @@ static void configure_i2s(void)
     wait_i2s(I2S_SYNCBUSY_ENABLE |
              I2S_SYNCBUSY_CKEN0  |
              I2S_SYNCBUSY_SEREN1);
-}
 
-static void i2s_write_stereo(int32_t sample)
-{
-    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
-    I2S->DATA[1].reg = (uint32_t)sample;
-
-    while (!(I2S->INTFLAG.bit.TXRDY1)) {}
-    I2S->DATA[1].reg = (uint32_t)sample;
+    // Prime first sample so TXRDY keeps firing
+    i2s_slot = 0;
+    I2S->DATA[1].reg = 0;
 }
 
 void setup()
@@ -395,27 +429,9 @@ void setup()
 
 void loop()
 {
-    static uint32_t slow_div = 0;
-
-    // Encoder is cheap — every sample so detents are never missed
+    // All slow work is fine here – audio is in the I2S ISR
     encoder_poll();
-
-    env_tick();
-
-    int32_t raw = sine_lookup(phase);
-    int32_t sample = (int32_t)(((int64_t)raw * env_level) >> 16);
-    sample = (int32_t)(((int64_t)sample * volume) / VOLUME_MAX);
-
-    i2s_write_stereo(sample);
-    phase += phase_inc;
-
-    if (!gate_on && env_level == 0)
-        phase_inc = 0;
-
-    // TM1638 stays rare (~20 ms) to protect audio quality
-    if (++slow_div >= 1000) {
-        slow_div = 0;
-        tm_poll();
-        led_toggle();
-    }
+    tm_poll();
+    delay(5);   // ~200 Hz UI rate; no effect on sample timing
+    led_toggle();
 }
