@@ -9,16 +9,15 @@
  *
  * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
  *
- * Pitch calibration (spectrum):
- *   At SAMPLE_RATE 39279: S1=674 (target 523), S8=1342 (target 1047)
- *   Ratio ≈ 1.28 both ends → SAMPLE_RATE *= 674/523 → 50621
+ * Pitch: at 50621, S1=554 (target 523), S8=959 (target 1047).
+ * S1 is reliable at lower freq → SAMPLE_RATE *= 554/523 → 53622
  */
 
 #include <Arduino.h>
 #include "sam.h"
 #include <math.h>
 
-static constexpr uint32_t SAMPLE_RATE_HZ = 50621;
+static constexpr uint32_t SAMPLE_RATE_HZ = 53622;
 static constexpr uint32_t SINE_LEN       = 512;
 static constexpr int      VOLUME_MAX     = 64;
 
