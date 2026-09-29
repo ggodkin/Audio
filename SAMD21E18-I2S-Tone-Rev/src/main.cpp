@@ -44,7 +44,7 @@ static constexpr int      PRESET_VLN     = 6;
 // deterministic 523 Hz sine through the same ring buffer and I2S ISR.
 // This removes ADSR/voice allocation from the test without changing
 // the encoder or TM1638 handling.
-static constexpr bool AUDIO_DIAGNOSTIC_TONE = false;
+static constexpr bool AUDIO_DIAGNOSTIC_TONE = true;
 static constexpr uint32_t DIAG_PHASE_INC =
     (uint32_t)(((uint64_t)523 << 32) / SAMPLE_RATE_HZ);
 static uint32_t diag_phase = 0;
