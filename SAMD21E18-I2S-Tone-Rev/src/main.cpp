@@ -221,19 +221,24 @@ static void instrument_tables_init()
 
         // Precomputed timbres keep the audio render path to one table lookup.
         // Coefficients are deliberately modest and normalized.
+        // Deliberately distinct spectra: SAX is bright/odd-harmonic rich;
+        // violin is richer in upper harmonics. These are precomputed so the
+        // audio loop remains inexpensive.
         double sax = sin(a)
-                  + 0.35 * sin(2.0 * a)
-                  + 0.18 * sin(3.0 * a)
-                  + 0.08 * sin(4.0 * a);
+                  + 0.55 * sin(3.0 * a)
+                  + 0.30 * sin(5.0 * a)
+                  + 0.18 * sin(7.0 * a)
+                  + 0.10 * sin(2.0 * a);
 
         double vln = sin(a)
-                  + 0.45 * sin(2.0 * a)
-                  + 0.25 * sin(3.0 * a)
-                  + 0.12 * sin(4.0 * a)
-                  + 0.06 * sin(5.0 * a);
+                  + 0.70 * sin(2.0 * a)
+                  + 0.50 * sin(3.0 * a)
+                  + 0.35 * sin(4.0 * a)
+                  + 0.25 * sin(5.0 * a)
+                  + 0.15 * sin(6.0 * a);
 
-        sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 1.61);
-        vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 1.88);
+        sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
+        vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
     }
 }
 
