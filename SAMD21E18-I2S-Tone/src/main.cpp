@@ -217,19 +217,33 @@ static int find_voice_for_note(int note)
 
 static int alloc_voice(void)
 {
+    /* Prefer fully idle */
     for (int i = 0; i < NUM_VOICES; i++) {
         if (voices[i].note < 0 && voices[i].env_stage == ENV_IDLE)
             return i;
     }
+    /* Prefer free note slot still decaying (note already cleared) */
     for (int i = 0; i < NUM_VOICES; i++) {
         if (voices[i].note < 0)
             return i;
     }
+    /* All voices tied to live notes — steal quietest releasing, else oldest */
+    int best = -1;
+    int32_t best_el = 0x7fffffff;
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (voices[i].env_stage == ENV_RELEASE && voices[i].env_level < best_el) {
+            best_el = voices[i].env_level;
+            best = i;
+        }
+    }
+    if (best >= 0)
+        return best;
+
     int oldest = 0;
-    uint32_t best = voices[0].age;
+    uint32_t best_age = voices[0].age;
     for (int i = 1; i < NUM_VOICES; i++) {
-        if (voices[i].age < best) {
-            best = voices[i].age;
+        if (voices[i].age < best_age) {
+            best_age = voices[i].age;
             oldest = i;
         }
     }
@@ -265,8 +279,10 @@ static void note_off(int note)
 {
     int v = find_voice_for_note(note);
     if (v < 0) return;
-    voices[v].env_stage = ENV_RELEASE;
-    voices[v].note      = -1;
+    /* Keep note id until envelope hits IDLE so we don't double-allocate
+     * or lose track mid-release (fixes ghost re-trigger on multi-key). */
+    if (voices[v].env_stage != ENV_IDLE)
+        voices[v].env_stage = ENV_RELEASE;
 }
 
 extern "C" void I2S_Handler(void)
@@ -299,6 +315,7 @@ extern "C" void I2S_Handler(void)
                     else {
                         v->env_stage = ENV_IDLE;
                         v->phase_inc = 0;
+                        v->note      = -1;
                         el = 0;
                     }
                 }
@@ -312,6 +329,7 @@ extern "C" void I2S_Handler(void)
                     el = 0;
                     v->env_stage = ENV_IDLE;
                     v->phase_inc = 0;
+                    v->note      = -1;
                 }
                 break;
             default:
@@ -619,39 +637,47 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
-    /* 2-sample debounce: ignore transient ghosts when releasing one of several keys */
-    static uint8_t prev = 0;
+    /* 2-sample debounce + release-priority anti-ghost.
+     * TM1638 / diode-less matrices often show a phantom press in the same
+     * scan as a real release when 2+ keys were held — that caused the
+     * "extra note when releasing the second key" bug in sustained modes. */
     static uint8_t stable = 0;
     static uint8_t candidate = 0;
     static uint8_t cand_count = 0;
 
     uint8_t keys = keys_physical(tm_read_keys_raw());
     if (keys == candidate) {
-        if (cand_count < 2)
+        if (cand_count < 3)
             cand_count++;
     } else {
         candidate = keys;
         cand_count = 1;
     }
-    if (cand_count < 2)
-        return;   /* not stable yet */
+    if (cand_count < 3)
+        return;
 
     if (keys == stable)
-        return;   /* no edge */
+        return;
 
     uint8_t pressed  = keys & ~stable;
     uint8_t released = stable & ~keys;
 
-    for (int i = 0; i < 8; i++) {
-        if (pressed & (1u << i))
-            note_on(i);
-        if (released & (1u << i))
-            note_off(i);
+    /* If anything was released this frame, only process releases.
+     * Concurrent "presses" are almost always matrix ghosts. */
+    if (released) {
+        for (int i = 0; i < 8; i++) {
+            if (released & (1u << i))
+                note_off(i);
+        }
+    } else if (pressed) {
+        for (int i = 0; i < 8; i++) {
+            if (pressed & (1u << i))
+                note_on(i);
+        }
     }
 
     tm_set_leds(keys);
     stable = keys;
-    prev = keys;
 }
 
 static void wait_gclk(void)
