@@ -27,8 +27,8 @@ Bare ATSAMD21E18A → MAX98357A with I2S 4-voice synth, rotary volume/preset, an
 | 3 | PAD | Pad – slow attack, long release |
 | 4 | BRS | Brass – medium attack, 50% sustain |
 | 5 | PNO | Piano – fast attack, decays while held |
-| 6 | SAX | Saxophone – medium attack + harmonics |
-| 7 | VLN | Violin – slow bow attack + 2nd harmonic |
+| 6 | SAX | Saxophone – medium attack + quiet harmonics |
+| 7 | VLN | Violin – slow bow attack + quiet 2nd harmonic |
 | 8 | DRM | Drum kit – short percussive hits |
 
 ## Buttons → notes (melody modes)
@@ -44,26 +44,28 @@ Bare ATSAMD21E18A → MAX98357A with I2S 4-voice synth, rotary volume/preset, an
 | S7 | B5 | 988 |
 | S8 | C6 | 1047 |
 
-## Buttons → drums (DRM mode)
+## Drum synthesis (DRM mode)
 
-| Button | Sound |
-|--------|--------|
-| S1 | Kick |
-| S2 | Snare |
-| S3 | Hi-hat (filtered noise) |
-| S4 | Clap |
-| S5 | Tom low |
-| S6 | Tom mid |
-| S7 | Rim |
-| S8 | Crash (filtered noise) |
+All pads share the global DRM envelope: instant attack, ~40 ms decay, no sustain.
 
-- Hold = on, release = off  
-- 4-voice polyphonic  
-- LED under held button lights up  
+| Button | Sound | Waveform | Pitch | Gain | Notes |
+|--------|--------|----------|-------|------|-------|
+| S1 | Kick | Pure sine | 150 Hz | 2.0× | Raised for small speakers |
+| S2 | Snare | Pure sine | 200 Hz | 1.0× | Body tone only |
+| S3 | Hi-hat | Sine + light filtered noise | 7 kHz | 1.1× | Metallic; sine-dominant |
+| S4 | Clap | Pure sine | 280 Hz | 1.0× | |
+| S5 | Tom low | Pure sine | 160 Hz | 1.0× | |
+| S6 | Tom mid | Pure sine | 220 Hz | 1.0× | |
+| S7 | Rim | Pure sine | 500 Hz | 1.0× | |
+| S8 | Crash | Sine + light filtered noise | 4.5 kHz | 1.0× | Metallic; sine-dominant |
+
+Noise uses a 16-bit LFSR through a one-pole low-pass so it is less harsh than raw white noise.
 
 ## Volume
 
 Encoder: 0…64. Push toggles volume ↔ preset select.
+
+Keys are 2-sample debounced to reduce ghost triggers when releasing one of several held buttons.
 
 ## Build
 

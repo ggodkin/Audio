@@ -41,27 +41,39 @@ static const uint16_t button_hz[8] = {
 };
 
 /* Drum pitch map (Hz) – approximate classic kit tones */
+/*
+ * How each drum is synthesized:
+ *   S1 Kick  – sine 150 Hz, gain 2.0x, pure tone body
+ *   S2 Snare – sine 200 Hz, gain 1.0x, pure tone
+ *   S3 HH    – sine 7 kHz + light filtered noise, gain 1.1x (metallic)
+ *   S4 Clap  – sine 280 Hz, gain 1.0x
+ *   S5 TomL  – sine 160 Hz, gain 1.0x
+ *   S6 TomM  – sine 220 Hz, gain 1.0x
+ *   S7 Rim   – sine 500 Hz, gain 1.0x
+ *   S8 Crash – sine 4.5 kHz + light filtered noise, gain 1.0x (metallic)
+ * Envelope for all: global DRM ADSR (~40 ms decay, no sustain).
+ */
 static const uint16_t drum_hz[8] = {
-    150,  // Kick – higher so small speakers can reproduce it
-    200,  // Snare body
-    8000, // Hi-hat carrier (noise-dominated)
+    150,  // Kick
+    200,  // Snare
+    7000, // Hi-hat carrier
     280,  // Clap
     160,  // Tom low
     220,  // Tom mid
     500,  // Rim
-    5000  // Crash carrier
+    4500  // Crash carrier
 };
 
 /* Relative gain 0–256 (256 = unity). */
 static const uint16_t drum_gain[8] = {
-    512,  // Kick  – 2x (was soft)
+    512,  // Kick
     256,  // Snare
-     64,  // Hi-hat – very quiet noise
+    280,  // Hi-hat (was inaudible at 64)
     256,  // Clap
     256,  // Tom low
     256,  // Tom mid
     256,  // Rim
-     64,  // Crash – very quiet noise
+    256,  // Crash
 };
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -114,8 +126,8 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
     { 8000,      3,   0,                 40, { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
-    {   80,     30,   ENV_ONE,          15,  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
-    {   10,     20,   ENV_ONE,           8,  { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
+    {   80,     30,   ENV_ONE,          25,  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
+    {   10,     20,   ENV_ONE,          20,  { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
     { 8192,     50,   0,                200, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
@@ -313,23 +325,20 @@ extern "C" void I2S_Handler(void)
 
             int32_t raw;
             if (v->is_noise) {
-                /* Filtered noise + quiet high sine — keep well below clip */
-                int32_t n = next_noise() >> 2;          // extra attenuate
-                int32_t s = sine_lookup(v->phase) >> 4;
-                raw = n + s;
+                /* Metallic: dominant high sine + a little filtered noise */
+                int32_t s = sine_lookup(v->phase);
+                int32_t n = next_noise() >> 4;   // small noise dusting
+                raw = (s >> 1) + n;              // mostly sine, headroom left
             } else {
                 raw = sine_lookup(v->phase);
-                /* Sax / violin: add quieter 2nd harmonic for richer tone */
-                if (preset_idx == PRESET_SAX || preset_idx == PRESET_VLN) {
-                    int32_t h2 = sine_lookup(v->phase * 2) >> 2;  // -12 dB
-                    if (preset_idx == PRESET_SAX) {
-                        int32_t h3 = sine_lookup(v->phase * 3) >> 3; // -18 dB
-                        raw = raw + h2 + h3;
-                    } else {
-                        raw = raw + h2;
-                    }
-                    /* prevent overflow before env scale */
-                    raw = raw >> 1;
+                /* Sax / violin: quiet harmonics (keep headroom for polyphony) */
+                if (preset_idx == PRESET_SAX) {
+                    int32_t h2 = sine_lookup(v->phase << 1) >> 3;  // -18 dB
+                    int32_t h3 = sine_lookup(v->phase * 3) >> 4;  // -24 dB
+                    raw = (raw >> 1) + h2 + h3;  // ~0.5 + small partials
+                } else if (preset_idx == PRESET_VLN) {
+                    int32_t h2 = sine_lookup(v->phase << 1) >> 3;  // -18 dB
+                    raw = (raw >> 1) + h2;
                 }
             }
             /* env * gain (256 = unity) */
@@ -339,16 +348,15 @@ extern "C" void I2S_Handler(void)
             v->phase += v->phase_inc;
         }
 
-        /* Drums: fewer simultaneous hits — keep louder; melody: average voices */
+        /* Normalize: drums stay loud; melody divide by voice count */
         if (preset_idx == PRESET_DRUM)
-            mix = (mix * 3) / 2;   /* slight boost, no /NUM_VOICES */
+            mix = (mix * 5) / 4;
         else
             mix /= NUM_VOICES;
         mix = (mix * volume) / VOLUME_MAX;
 
-        /* soft-ish clamp */
-        if (mix >  2000000000LL) mix =  2000000000LL;
-        if (mix < -2000000000LL) mix = -2000000000LL;
+        if (mix >  1800000000LL) mix =  1800000000LL;
+        if (mix < -1800000000LL) mix = -1800000000LL;
 
         i2s_hold = (int32_t)mix;
         I2S->DATA[1].reg = (uint32_t)(int32_t)mix;
@@ -611,10 +619,28 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
+    /* 2-sample debounce: ignore transient ghosts when releasing one of several keys */
     static uint8_t prev = 0;
+    static uint8_t stable = 0;
+    static uint8_t candidate = 0;
+    static uint8_t cand_count = 0;
+
     uint8_t keys = keys_physical(tm_read_keys_raw());
-    uint8_t pressed  = keys & ~prev;
-    uint8_t released = prev & ~keys;
+    if (keys == candidate) {
+        if (cand_count < 2)
+            cand_count++;
+    } else {
+        candidate = keys;
+        cand_count = 1;
+    }
+    if (cand_count < 2)
+        return;   /* not stable yet */
+
+    if (keys == stable)
+        return;   /* no edge */
+
+    uint8_t pressed  = keys & ~stable;
+    uint8_t released = stable & ~keys;
 
     for (int i = 0; i < 8; i++) {
         if (pressed & (1u << i))
@@ -624,6 +650,7 @@ static void tm_poll(void)
     }
 
     tm_set_leds(keys);
+    stable = keys;
     prev = keys;
 }
 
