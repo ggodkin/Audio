@@ -180,7 +180,7 @@ static volatile int32_t  noise_lpf  = 0;         // one-pole low-pass state
 
 // Audio producer/consumer buffer. The main loop renders audio; the I2S ISR
 // only moves already-rendered samples into the I2S DATA register.
-static constexpr uint16_t AUDIO_BUFFER_FRAMES = 1024;
+static constexpr uint16_t AUDIO_BUFFER_FRAMES = 2048;
 static constexpr uint16_t AUDIO_BUFFER_MASK   = AUDIO_BUFFER_FRAMES - 1;
 static int32_t audio_buffer[AUDIO_BUFFER_FRAMES];
 static volatile uint16_t audio_read_index  = 0;
@@ -558,13 +558,13 @@ static int32_t synth_next_sample()
         v->phase += v->phase_inc;
     }
 
-    // Keep output gain independent of current polyphony. Dividing by the
-    // number of active voices makes a remaining note jump in level when
-    // another note is released, which sounds like a ghost note.
+    // Keep a fixed headroom budget for the four-voice mixer. The organ
+    // waveform contains several drawbars plus click/leakage, so reserve
+    // additional headroom rather than relying on the final clip limiter.
     if (preset_idx == PRESET_DRUM)
         mix = (mix * 5) / 4;
     else
-        mix /= NUM_VOICES;
+        mix /= (NUM_VOICES * 2);
 
     mix = (mix * volume) / VOLUME_MAX;
 
@@ -999,7 +999,7 @@ void loop()
     // Keep the producer running continuously. The previous 200 us delay
     // artificially limited the available CPU time for the 4-voice synth and
     // could allow the audio queue to drain between fills.
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 64; i++) {
         if (encoder_poll())
             changed = true;
 
