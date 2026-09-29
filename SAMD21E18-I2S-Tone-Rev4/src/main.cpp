@@ -311,7 +311,7 @@ static void note_off(int note)
         voices[v].env_stage = ENV_RELEASE;
 }
 
-static int32_t synth_next_sample()
+static int32_t synth_next_sample/()
 {
     const Adsr *adsr = &PRESETS[preset_idx];
     int32_t mix = 0;
@@ -357,7 +357,6 @@ static int32_t synth_next_sample()
                 v->env_stage = ENV_IDLE;
                 v->phase_inc = 0;
                 v->note = -1;
-                v->fast_rel = 0;
             }
             break;
         }
@@ -735,7 +734,11 @@ static void tm_poll(void)
         }
     }
 
-    tm_set_leds(debounced);
+    static uint8_t displayed = 0xFF;
+    if (debounced != displayed) {
+        tm_set_leds(debounced);
+        displayed = debounced;
+    }
 }
 
 static void wait_gclk(void)
