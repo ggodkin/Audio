@@ -244,7 +244,7 @@ static inline int32_t instrument_lookup(const int32_t *table, uint32_t ph)
 {
     return table[(ph >> 22) & (SINE_LEN - 1)];
 }
-\nstatic inline int32_t organ_lookup(uint32_t ph)
+static inline int32_t organ_lookup(uint32_t ph)
 {
     // Hammond-style drawbars relative to the played note:
     // 16' = 0.5x, 8' = 1x, 5 1/3' = 1.5x, 4' = 2x,
