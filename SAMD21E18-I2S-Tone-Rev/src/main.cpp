@@ -211,6 +211,37 @@ static inline int32_t sine_lookup_fast(uint32_t ph)
     return sine_table[(ph >> 22) & (SINE_LEN - 1)];
 }
 
+static int32_t sax_table[SINE_LEN];
+static int32_t vln_table[SINE_LEN];
+
+static void instrument_tables_init()
+{
+    for (uint32_t i = 0; i < SINE_LEN; i++) {
+        const double a = 2.0 * M_PI * (double)i / (double)SINE_LEN;
+
+        // Precomputed timbres keep the audio render path to one table lookup.
+        // Coefficients are deliberately modest and normalized.
+        double sax = sin(a)
+                  + 0.35 * sin(2.0 * a)
+                  + 0.18 * sin(3.0 * a)
+                  + 0.08 * sin(4.0 * a);
+
+        double vln = sin(a)
+                  + 0.45 * sin(2.0 * a)
+                  + 0.25 * sin(3.0 * a)
+                  + 0.12 * sin(4.0 * a)
+                  + 0.06 * sin(5.0 * a);
+
+        sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 1.61);
+        vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 1.88);
+    }
+}
+
+static inline int32_t instrument_lookup(const int32_t *table, uint32_t ph)
+{
+    return table[(ph >> 22) & (SINE_LEN - 1)];
+}
+
 static int32_t sine_lookup(uint32_t ph)
 {
     uint32_t idx  = ph >> 22;
@@ -394,19 +425,12 @@ static int32_t synth_next_sample()
             int32_t n = next_noise() >> 4;
             raw = (sine >> 1) + n;
         } else {
-            raw = sine_lookup(v->phase);
-
-            // Keep the basic oscillator stable while we characterize
-            // instrument timbres. Use only one low-level harmonic at a time.
-            // This avoids the harsh multi-tone SAX result and keeps the
-            // render path comfortably within the SAMD21 budget.
-            if (preset_idx == PRESET_SAX) {
-                const int32_t h2 = sine_lookup_fast(v->phase << 1);
-                raw = (raw * 7 + h2) / 8;
-            } else if (preset_idx == PRESET_VLN) {
-                const int32_t h2 = sine_lookup_fast(v->phase << 1);
-                raw = (raw * 7 + h2) / 8;
-            }
+            if (preset_idx == PRESET_SAX)
+                raw = instrument_lookup(sax_table, v->phase);
+            else if (preset_idx == PRESET_VLN)
+                raw = instrument_lookup(vln_table, v->phase);
+            else
+                raw = sine_lookup(v->phase);
         }
 
         /* Preserve the known-good Rev2 fixed-point scaling exactly. The
@@ -836,6 +860,7 @@ void setup()
     led_blink_n(3, 50, 50);
 
     sine_table_init();
+    instrument_tables_init();
     voices_init();
     encoder_init();
     tm_init();
