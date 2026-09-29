@@ -534,9 +534,11 @@ static int32_t synth_next_sample()
         }
 
         if (preset_idx == 0) {
-            // Rotary-speaker-style tremolo. This is intentionally subtle
-            // because the signal is mono; the pitch LFO above supplies the
-            // remaining motion.
+            // Compact mono approximation of Hammond C/V:
+            // a slow amplitude cycle plus a much smaller, slightly faster
+            // phase modulation. The two rates are intentionally not locked
+            // so the sound has continuously changing motion instead of a
+            // static vibrato effect.
             const int32_t trem = sine_lookup_fast(organ_tremolo_phase);
             const int32_t trem_gain = ENV_ONE + (trem >> 4);
             raw = (int32_t)(((int64_t)raw * trem_gain) >> 16);
