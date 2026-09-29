@@ -214,6 +214,8 @@ static inline int32_t sine_lookup_fast(uint32_t ph)
 static int32_t sax_table[SINE_LEN];
 static int32_t vln_table[SINE_LEN];
 static int32_t organ_harmonic_table[SINE_LEN];
+static int32_t organ_sub_table[SINE_LEN];
+static int32_t organ_5th3_table[SINE_LEN];
 
 static void instrument_tables_init()
 {
@@ -251,6 +253,12 @@ static void instrument_tables_init()
         sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
         vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
         organ_harmonic_table[i] = (int32_t)(organ * (double)SINE_PEAK / 744.0);
+
+        // Store the two non-integer drawbars already scaled to the same
+        // output range. This removes all large integer multiplies/divides
+        // from the real-time organ path.
+        organ_sub_table[i] = (int32_t)(sin(0.5 * a) * (96.0 / 744.0) * (double)SINE_PEAK);
+        organ_5th3_table[i] = (int32_t)(sin(1.5 * a) * (150.0 / 744.0) * (double)SINE_PEAK);
     }
 }
 
@@ -261,13 +269,13 @@ static inline int32_t instrument_lookup(const int32_t *table, uint32_t ph)
 
 static inline int32_t organ_lookup(uint32_t ph)
 {
-    // Runtime work is now only three table lookups and two additions.
-    // 16' = 0.5x and 5 1/3' = 1.5x are retained exactly through phase
-    // scaling; the remaining Hammond drawbars are in organ_harmonic_table.
-    int32_t s = organ_harmonic_table[(ph >> 22) & (SINE_LEN - 1)];
-    s += (sine_lookup_fast(ph >> 1) * 96) / 744;
-    s += (sine_lookup_fast(ph + (ph >> 1)) * 150) / 744;
-    return s;
+    // All Hammond drawbars are precomputed. The runtime path is only
+    // three table reads and two additions, which is comfortably inside
+    // the SAMD21 audio producer budget.
+    const uint32_t idx = (ph >> 22) & (SINE_LEN - 1);
+    return organ_harmonic_table[idx]
+         + organ_sub_table[idx]
+         + organ_5th3_table[idx];
 }
 
 
