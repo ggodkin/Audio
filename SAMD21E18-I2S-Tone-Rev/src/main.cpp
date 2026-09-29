@@ -44,7 +44,10 @@ static constexpr int      PRESET_VLN     = 6;
 // deterministic 523 Hz sine through the same ring buffer and I2S ISR.
 // This removes ADSR/voice allocation from the test without changing
 // the encoder or TM1638 handling.
-static constexpr bool AUDIO_DIAGNOSTIC_TONE = true;
+static constexpr bool AUDIO_DIAGNOSTIC_TONE = false;
+// CPU-isolation test: use the real 4-voice ADSR/mixer/voice allocator, but
+// replace the expensive instrument DSP with a plain sine oscillator.
+static constexpr bool AUDIO_POLYPHONY_TEST = true;
 static constexpr uint32_t DIAG_PHASE_INC =
     (uint32_t)(((uint64_t)523 << 32) / SAMPLE_RATE_HZ);
 static uint32_t diag_phase = 0;
@@ -505,7 +508,11 @@ static int32_t synth_next_sample()
         } else {
             uint32_t voice_phase = v->phase;
 
-            if (preset_idx == 0) {
+            if (AUDIO_POLYPHONY_TEST) {
+                // Real voice allocator, ADSR, mixer and I2S path; cheap
+                // oscillator only. This isolates polyphony from organ DSP.
+                raw = sine_lookup_fast(voice_phase);
+            } else if (preset_idx == 0) {
                 // ~6 Hz Hammond vibrato, about ±0.15% pitch deviation.
                 const int32_t lfo = sine_lookup_fast(organ_lfo_phase);
                 const uint32_t vibrato_offset =
@@ -538,7 +545,7 @@ static int32_t synth_next_sample()
             }
         }
 
-        if (preset_idx == 0) {
+        if (!AUDIO_POLYPHONY_TEST && preset_idx == 0) {
             // Compact mono approximation of Hammond C/V:
             // a slow amplitude cycle plus a much smaller, slightly faster
             // phase modulation. The two rates are intentionally not locked
