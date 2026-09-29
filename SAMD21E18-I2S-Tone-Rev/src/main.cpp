@@ -138,8 +138,10 @@ struct Adsr {
 // corresponding envelope range. A zero value means an immediate transition.
 static constexpr int32_t env_rate_from_ms(uint32_t ms)
 {
-    return (ms == 0) ? ENV_ONE : (int32_t)((ENV_ONE * 1000ULL) /
-                                           ((uint64_t)ms * SAMPLE_RATE_HZ));
+    if (ms == 0) return ENV_ONE;
+    const uint64_t rate = (ENV_ONE * 1000ULL) /
+                          ((uint64_t)ms * SAMPLE_RATE_HZ);
+    return (int32_t)(rate == 0 ? 1 : rate);
 }
 
 /*
@@ -148,21 +150,21 @@ static constexpr int32_t env_rate_from_ms(uint32_t ms)
  *
  * ORG – fast attack, full sustain, ~2 s release
  * PLK – instant attack, ~180 ms decay, short release
- * PAD – ~1 s attack, full sustain, ~2.5 s release
+ * PAD – ~1 s attack, full sustain, ~2 s release
  * BRS – ~150 ms attack, ~500 ms decay toward 50%, ~1 s release
- * PNO – fast attack, ~5 s decay to silence, ~1 s release
+ * PNO – fast attack, ~2 s decay to silence, ~1 s release
  * SAX – ~70 ms attack, ~300 ms decay toward 75%, ~700 ms release
- * VLN – ~120 ms attack, ~500 ms decay toward 75%, ~2.5 s release
+ * VLN – ~120 ms attack, ~500 ms decay toward 75%, ~2 s release
  * DRM – instant attack, ~150 ms decay, no audible release
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
     { env_rate_from_ms(2),    env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2000), { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
     { env_rate_from_ms(1),    env_rate_from_ms(180),  0,                  env_rate_from_ms(250),  { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
-    { env_rate_from_ms(1000), env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2500), { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
+    { env_rate_from_ms(1000), env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2000), { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     { env_rate_from_ms(150),  env_rate_from_ms(500), ENV_ONE / 2,         env_rate_from_ms(1000), { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
-    { env_rate_from_ms(5),    env_rate_from_ms(5000), 0,                  env_rate_from_ms(1000), { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    { env_rate_from_ms(5),    env_rate_from_ms(2000), 0,                  env_rate_from_ms(1000), { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
     { env_rate_from_ms(70),   env_rate_from_ms(300), ENV_ONE * 3 / 4,     env_rate_from_ms(700),  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
-    { env_rate_from_ms(120),  env_rate_from_ms(500), ENV_ONE * 3 / 4,     env_rate_from_ms(2500), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
+    { env_rate_from_ms(120),  env_rate_from_ms(500), ENV_ONE * 3 / 4,     env_rate_from_ms(2000), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
     { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(50),   { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
