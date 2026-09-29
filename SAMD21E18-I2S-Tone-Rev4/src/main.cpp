@@ -307,9 +307,6 @@ static void note_off(int note)
 {
     int v = find_voice_for_note(note);
     if (v < 0) return;
-
-    // Release exactly the voice assigned to this key. No cross-voice
-    // shortening or stealing is performed on key release.
     if (voices[v].env_stage != ENV_IDLE)
         voices[v].env_stage = ENV_RELEASE;
 }
@@ -708,53 +705,37 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
-    /* Debounce + release-priority anti-ghost + post-release press blanking.
-     * Ghost key-downs often appear 1–2 scans AFTER a real key-up when
-     * another key is still held. */
-    static uint8_t  stable = 0;
-    static uint8_t  candidate = 0;
-    static uint8_t  cand_count = 0;
-    static uint32_t press_block_until = 0;  /* millis() timestamp */
+    // Debounce each key independently. A key must be observed consistently
+    // for five consecutive scans before its gate changes.
+    static constexpr uint8_t KEY_THRESH = 5;
+    static uint8_t counters[8] = {};
+    static uint8_t debounced = 0;
 
-    uint8_t keys = keys_physical(tm_read_keys_raw());
-    if (keys == candidate) {
-        if (cand_count < 3)
-            cand_count++;
-    } else {
-        candidate = keys;
-        cand_count = 1;
-    }
-    if (cand_count < 3)
-        return;
+    uint8_t raw = keys_physical(tm_read_keys_raw());
 
-    if (keys == stable) {
-        tm_set_leds(keys);
-        return;
-    }
+    for (int i = 0; i < 8; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
 
-    uint8_t pressed  = keys & ~stable;
-    uint8_t released = stable & ~keys;
-    uint32_t now = millis();
+        if (raw & bit) {
+            if (counters[i] < KEY_THRESH)
+                counters[i]++;
 
-    if (released) {
-        for (int i = 0; i < 8; i++) {
-            if (released & (1u << i))
+            if (counters[i] == KEY_THRESH && !(debounced & bit)) {
+                debounced |= bit;
+                note_on(i);
+            }
+        } else {
+            if (counters[i] > 0)
+                counters[i]--;
+
+            if (counters[i] == 0 && (debounced & bit)) {
+                debounced &= (uint8_t)~bit;
                 note_off(i);
-        }
-        /* Ignore new presses for 50 ms — catches delayed matrix ghosts */
-        press_block_until = now + 50;
-    } else if (pressed) {
-        if ((int32_t)(now - press_block_until) >= 0) {
-            for (int i = 0; i < 8; i++) {
-                if (pressed & (1u << i))
-                    note_on(i);
             }
         }
-        /* else: drop ghost press */
     }
 
-    tm_set_leds(keys);
-    stable = keys;
+    tm_set_leds(debounced);
 }
 
 static void wait_gclk(void)
