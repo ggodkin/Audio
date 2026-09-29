@@ -213,15 +213,16 @@ static inline int32_t sine_lookup_fast(uint32_t ph)
 
 static int32_t sax_table[SINE_LEN];
 static int32_t vln_table[SINE_LEN];
+static int32_t organ_harmonic_table[SINE_LEN];
 
 static void instrument_tables_init()
 {
     for (uint32_t i = 0; i < SINE_LEN; i++) {
         const double a = 2.0 * M_PI * (double)i / (double)SINE_LEN;
 
-        // SAX and VLN are precomputed. ORG is handled by a dedicated
-        // drawbar-style oscillator below because it needs non-integer
-        // partials (16' sub-octave and 5 1/3' = 1.5x).
+        // SAX and VLN are precomputed. ORG keeps the Hammond drawbar
+        // spectrum, but the integer harmonics are also precomputed so the
+        // real-time audio path does not perform 64-bit multiplies/divides.
         double sax = sin(a)
                   + 0.55 * sin(3.0 * a)
                   + 0.30 * sin(5.0 * a)
@@ -235,8 +236,21 @@ static void instrument_tables_init()
                   + 0.25 * sin(5.0 * a)
                   + 0.15 * sin(6.0 * a);
 
+        // Hammond-style drawbars relative to the played note:
+        // 8' = 1x, 4' = 2x, 2 2/3' = 3x, 2' = 4x,
+        // 1 3/5' = 5x, 1 1/3' = 6x.
+        // The 16' (0.5x) and 5 1/3' (1.5x) partials remain separate
+        // because they are not periodic over one fundamental cycle.
+        double organ = sin(a) * 180.0
+                     + sin(2.0 * a) * 110.0
+                     + sin(3.0 * a) * 82.0
+                     + sin(4.0 * a) * 62.0
+                     + sin(5.0 * a) * 38.0
+                     + sin(6.0 * a) * 26.0;
+
         sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
         vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
+        organ_harmonic_table[i] = (int32_t)(organ * (double)SINE_PEAK / 744.0);
     }
 }
 
@@ -244,23 +258,16 @@ static inline int32_t instrument_lookup(const int32_t *table, uint32_t ph)
 {
     return table[(ph >> 22) & (SINE_LEN - 1)];
 }
+
 static inline int32_t organ_lookup(uint32_t ph)
 {
-    // Hammond-style drawbars relative to the played note:
-    // 16' = 0.5x, 8' = 1x, 5 1/3' = 1.5x, 4' = 2x,
-    // 2 2/3' = 3x, 2' = 4x, 1 3/5' = 5x, 1 1/3' = 6x.
-    // The sub-octave and 1.5x partial are the important difference from
-    // the earlier generic harmonic wavetable.
-    int64_t s = 0;
-    s += (int64_t)sine_lookup_fast(ph >> 1) * 96; // 16'
-    s += (int64_t)sine_lookup_fast(ph)       * 180; // 8'
-    s += (int64_t)sine_lookup_fast(ph + (ph >> 1)) * 150; // 5 1/3'
-    s += (int64_t)sine_lookup_fast(ph << 1) * 110; // 4'
-    s += (int64_t)sine_lookup_fast(ph * 3u) * 82; // 2 2/3'
-    s += (int64_t)sine_lookup_fast(ph << 2) * 62; // 2'
-    s += (int64_t)sine_lookup_fast(ph * 5u) * 38; // 1 3/5'
-    s += (int64_t)sine_lookup_fast(ph * 6u) * 26; // 1 1/3'
-    return (int32_t)(s / 744);
+    // Runtime work is now only three table lookups and two additions.
+    // 16' = 0.5x and 5 1/3' = 1.5x are retained exactly through phase
+    // scaling; the remaining Hammond drawbars are in organ_harmonic_table.
+    int32_t s = organ_harmonic_table[(ph >> 22) & (SINE_LEN - 1)];
+    s += (sine_lookup_fast(ph >> 1) * 96) / 744;
+    s += (sine_lookup_fast(ph + (ph >> 1)) * 150) / 744;
+    return s;
 }
 
 
