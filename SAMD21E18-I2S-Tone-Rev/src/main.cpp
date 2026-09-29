@@ -406,7 +406,7 @@ static int32_t synth_next_sample()
     return (int32_t)mix;
 }
 
-static void audio_buffer_fill(uint16_t max_frames = 480)
+static void audio_buffer_fill(uint16_t max_frames = 32)
 {
     uint16_t produced = 0;
     while (produced < max_frames) {
@@ -828,11 +828,10 @@ void loop()
     bool changed = false;
 
     for (int i = 0; i < 40; i++) {
-        audio_buffer_fill(12);
-
         if (encoder_poll())
             changed = true;
 
+        audio_buffer_fill(32);
         delayMicroseconds(200);
     }
 
