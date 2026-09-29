@@ -20,10 +20,12 @@
 #include "sam.h"
 #include <math.h>
 
-// I2S clocking: 48 MHz GCLK0 / (MCKDIV + 1) = 3 MHz SCK.
+// I2S clocking: 48 MHz GCLK0 / (MCKDIV + 1) = 2 MHz SCK.
 // Two 32-bit slots per frame => 64 BCLKs per audio sample.
+// 31.25 kHz gives the SAMD21 more CPU time per rendered sample while
+// remaining well within the MAX98357A's supported audio-rate range.
 static constexpr uint32_t I2S_GCLK_HZ       = 48000000;
-static constexpr uint32_t I2S_MCK_DIV       = 15;
+static constexpr uint32_t I2S_MCK_DIV       = 23;
 static constexpr uint32_t I2S_SLOTS         = 2;
 static constexpr uint32_t I2S_BITS_PER_SLOT = 32;
 static constexpr uint32_t SAMPLE_RATE_HZ =
