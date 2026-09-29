@@ -126,7 +126,7 @@ struct Adsr {
 /*
  * Rates per sample at 46.875 kHz. Time ≈ ENV_ONE / rate / SAMPLE_RATE seconds.
  *
- * ORG – ~90 ms attack, full sustain, ~2.2 s release; drawbar-style spectrum
+ * ORG – immediate attack, full sustain, ~2.2 s release; Hammond-style drawbars
  * PLK – instant on, ~15 ms decay to silence
  * PAD – ~1.0 s attack, full sustain, ~2 s release
  * BRS – ~0.2 s attack, decay to 50%, medium release
@@ -141,7 +141,7 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     // continues to zero after note_off().
     //
     // attack  decay  sustain           release
-    { 512,     256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
+    { 1024,    256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
     { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
@@ -211,7 +211,6 @@ static inline int32_t sine_lookup_fast(uint32_t ph)
     return sine_table[(ph >> 22) & (SINE_LEN - 1)];
 }
 
-static int32_t org_table[SINE_LEN];
 static int32_t sax_table[SINE_LEN];
 static int32_t vln_table[SINE_LEN];
 
@@ -220,21 +219,9 @@ static void instrument_tables_init()
     for (uint32_t i = 0; i < SINE_LEN; i++) {
         const double a = 2.0 * M_PI * (double)i / (double)SINE_LEN;
 
-        // Precomputed timbres keep the audio render path to one table lookup.
-        // ORG uses a drawbar-style additive spectrum: strong fundamental,
-        // octave, fifth, upper octave and higher upper partials. This is a
-        // static Hammond/pipe-organ approximation rather than a sine wave.
-        double org = 1.00 * sin(a)
-                   + 0.72 * sin(2.0 * a)
-                   + 0.48 * sin(3.0 * a)
-                   + 0.34 * sin(4.0 * a)
-                   + 0.24 * sin(5.0 * a)
-                   + 0.18 * sin(6.0 * a)
-                   + 0.13 * sin(8.0 * a)
-                   + 0.09 * sin(10.0 * a)
-                   + 0.06 * sin(12.0 * a)
-                   + 0.035 * sin(16.0 * a);
-
+        // SAX and VLN are precomputed. ORG is handled by a dedicated
+        // drawbar-style oscillator below because it needs non-integer
+        // partials (16' sub-octave and 5 1/3' = 1.5x).
         double sax = sin(a)
                   + 0.55 * sin(3.0 * a)
                   + 0.30 * sin(5.0 * a)
@@ -248,7 +235,6 @@ static void instrument_tables_init()
                   + 0.25 * sin(5.0 * a)
                   + 0.15 * sin(6.0 * a);
 
-        org_table[i] = (int32_t)(org * (double)SINE_PEAK / 3.055);
         sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
         vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
     }
@@ -258,6 +244,25 @@ static inline int32_t instrument_lookup(const int32_t *table, uint32_t ph)
 {
     return table[(ph >> 22) & (SINE_LEN - 1)];
 }
+\nstatic inline int32_t organ_lookup(uint32_t ph)
+{
+    // Hammond-style drawbars relative to the played note:
+    // 16' = 0.5x, 8' = 1x, 5 1/3' = 1.5x, 4' = 2x,
+    // 2 2/3' = 3x, 2' = 4x, 1 3/5' = 5x, 1 1/3' = 6x.
+    // The sub-octave and 1.5x partial are the important difference from
+    // the earlier generic harmonic wavetable.
+    int64_t s = 0;
+    s += (int64_t)sine_lookup_fast(ph >> 1) * 96; // 16'
+    s += (int64_t)sine_lookup_fast(ph)       * 180; // 8'
+    s += (int64_t)sine_lookup_fast(ph + (ph >> 1)) * 150; // 5 1/3'
+    s += (int64_t)sine_lookup_fast(ph << 1) * 110; // 4'
+    s += (int64_t)sine_lookup_fast(ph * 3u) * 82; // 2 2/3'
+    s += (int64_t)sine_lookup_fast(ph << 2) * 62; // 2'
+    s += (int64_t)sine_lookup_fast(ph * 5u) * 38; // 1 3/5'
+    s += (int64_t)sine_lookup_fast(ph * 6u) * 26; // 1 1/3'
+    return (int32_t)(s / 744);
+}
+
 
 static int32_t sine_lookup(uint32_t ph)
 {
@@ -443,7 +448,7 @@ static int32_t synth_next_sample()
             raw = (sine >> 1) + n;
         } else {
             if (preset_idx == 0)
-                raw = instrument_lookup(org_table, v->phase);
+                raw = organ_lookup(v->phase);
             else if (preset_idx == PRESET_SAX)
                 raw = instrument_lookup(sax_table, v->phase);
             else if (preset_idx == PRESET_VLN)
