@@ -167,6 +167,8 @@ struct Voice {
     volatile uint8_t  is_noise;       // 1 = noise source (hi-hat / crash)
     volatile uint16_t gain;           // 256 = unity
     volatile uint16_t click_level;     // Hammond key-click transient, 0..65535
+    volatile uint32_t perc_phase;      // 4' percussion oscillator phase
+    volatile uint16_t perc_level;      // percussion decay
 };
 
 static Voice voices[NUM_VOICES];
@@ -218,6 +220,7 @@ static int32_t organ_harmonic_table[SINE_LEN];
 static int32_t organ_sub_table[SINE_LEN];      // 16' (0.5x), weighted
 static int32_t organ_5th3_table[SINE_LEN];     // 5 1/3' (1.5x), weighted
 static int32_t organ_perc_table[SINE_LEN];     // 4' percussion
+static int32_t organ_leak_table[SINE_LEN];     // low-level fixed tonewheel leakage
 
 // Hammond-style modulation. A small ~6 Hz pitch wobble is much more
 // characteristic of a tonewheel organ than a perfectly static oscillator.
@@ -329,6 +332,8 @@ static void voices_init(void)
         voices[i].is_noise  = 0;
         voices[i].gain        = 256;
         voices[i].click_level = 0;
+        voices[i].perc_phase  = 0;
+        voices[i].perc_level  = 0;
     }
 }
 
@@ -390,6 +395,8 @@ static void note_on(int note)
     voices[v].env_stage = ENV_ATTACK;
     voices[v].age         = ++voice_age_counter;
     voices[v].click_level = (preset_idx == 0) ? ENV_ONE : 0;
+    voices[v].perc_phase  = 0;
+    voices[v].perc_level  = (preset_idx == 0) ? ENV_ONE : 0;
 
     if (preset_idx == PRESET_DRUM) {
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
