@@ -257,8 +257,17 @@ static void note_on(int note)
     if (note < 0 || note > 7) return;
 
     int v = find_voice_for_note(note);
-    if (v < 0)
+    if (v >= 0) {
+        /* Already sounding this key — ignore ghost re-press.
+         * Re-triggering would restart the envelope from 0 and sound
+         * like an extra note under the one you are still holding. */
+        uint8_t st = voices[v].env_stage;
+        if (st == ENV_ATTACK || st == ENV_DECAY || st == ENV_SUSTAIN)
+            return;
+        /* RELEASE or leftover: fall through and retrigger cleanly */
+    } else {
         v = alloc_voice();
+    }
 
     voices[v].note      = (int8_t)note;
     voices[v].phase     = 0;
@@ -268,7 +277,6 @@ static void note_on(int note)
     voices[v].age       = ++voice_age_counter;
 
     if (preset_idx == PRESET_DRUM) {
-        /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
         voices[v].phase_inc = hz_to_inc(drum_hz[note]);
         voices[v].gain      = drum_gain[note];
@@ -298,16 +306,24 @@ static void note_off(int note)
     if (voices[v].env_stage == ENV_IDLE)
         return;
 
-    /* If other keys are still held, snap this voice's release short so its
-     * long decay tail does not sit under the remaining note (the "extra
-     * note in the queue" on PAD/VLN/SAX/ORG). Solo release keeps normal ADSR. */
     int others = count_held_notes();
-    /* count_held includes this voice if it was still gated — subtract self */
     if (voices[v].env_stage != ENV_RELEASE)
         others -= 1;
 
-    voices[v].fast_rel  = (others > 0) ? 1 : 0;
-    voices[v].env_stage = ENV_RELEASE;
+    if (others > 0) {
+        /* Other keys still down: silence this voice immediately.
+         * A long release tail under a held note is what sounded like
+         * an "extra note sitting in the queue". */
+        voices[v].env_level = 0;
+        voices[v].env_stage = ENV_IDLE;
+        voices[v].phase_inc = 0;
+        voices[v].note      = -1;
+        voices[v].fast_rel  = 0;
+    } else {
+        /* Last key up: normal musical release */
+        voices[v].fast_rel  = 0;
+        voices[v].env_stage = ENV_RELEASE;
+    }
 }
 
 extern "C" void I2S_Handler(void)
@@ -382,14 +398,11 @@ extern "C" void I2S_Handler(void)
                 raw = (s >> 1) + n;              // mostly sine, headroom left
             } else {
                 raw = sine_lookup(v->phase);
-                /* Sax / violin: quiet harmonics (keep headroom for polyphony) */
-                if (preset_idx == PRESET_SAX) {
-                    int32_t h2 = sine_lookup(v->phase << 1) >> 3;  // -18 dB
-                    int32_t h3 = sine_lookup(v->phase * 3) >> 4;  // -24 dB
-                    raw = (raw >> 1) + h2 + h3;  // ~0.5 + small partials
-                } else if (preset_idx == PRESET_VLN) {
-                    int32_t h2 = sine_lookup(v->phase << 1) >> 3;  // -18 dB
-                    raw = (raw >> 1) + h2;
+                /* Sax / violin: very quiet 2nd harmonic only (no 3rd — was harsh
+                 * and clipped when two notes sustained). */
+                if (preset_idx == PRESET_SAX || preset_idx == PRESET_VLN) {
+                    int32_t h2 = sine_lookup(v->phase << 1) >> 4;  // -24 dB
+                    raw = (raw >> 1) + h2;  // ~0.5 fund + tiny partial
                 }
             }
             /* env * gain (256 = unity) */
@@ -670,13 +683,13 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
-    /* Debounce + release-priority anti-ghost + post-release press blanking.
-     * Ghost key-downs often appear 1–2 scans AFTER a real key-up when
-     * another key is still held. */
+    /* Debounce + release-priority anti-ghost.
+     * Critical: on release frames, only clear released bits from `stable`.
+     * Never adopt the raw scan into stable when it may contain matrix ghosts. */
     static uint8_t  stable = 0;
     static uint8_t  candidate = 0;
     static uint8_t  cand_count = 0;
-    static uint32_t press_block_until = 0;  /* millis() timestamp */
+    static uint32_t press_block_until = 0;
 
     uint8_t keys = keys_physical(tm_read_keys_raw());
     if (keys == candidate) {
@@ -690,7 +703,7 @@ static void tm_poll(void)
         return;
 
     if (keys == stable) {
-        tm_set_leds(keys);
+        tm_set_leds(stable);
         return;
     }
 
@@ -703,20 +716,22 @@ static void tm_poll(void)
             if (released & (1u << i))
                 note_off(i);
         }
-        /* Ignore new presses for 50 ms — catches delayed matrix ghosts */
-        press_block_until = now + 50;
-    } else if (pressed) {
-        if ((int32_t)(now - press_block_until) >= 0) {
-            for (int i = 0; i < 8; i++) {
-                if (pressed & (1u << i))
-                    note_on(i);
-            }
-        }
-        /* else: drop ghost press */
+        press_block_until = now + 80;
+        /* Drop only the keys that went up — keep held keys, ignore ghosts */
+        stable = stable & ~released;
+        tm_set_leds(stable);
+        return;
     }
 
-    tm_set_leds(keys);
-    stable = keys;
+    if (pressed && (int32_t)(now - press_block_until) >= 0) {
+        for (int i = 0; i < 8; i++) {
+            if (pressed & (1u << i))
+                note_on(i);
+        }
+        stable = stable | pressed;
+    }
+
+    tm_set_leds(stable);
 }
 
 static void wait_gclk(void)
