@@ -146,6 +146,7 @@ struct Voice {
     volatile uint32_t age;
     volatile uint8_t  is_noise;   // 1 = noise source (hi-hat / crash)
     volatile uint16_t gain;       // 256 = unity
+    volatile uint8_t  fast_rel;   // 1 = cut release short (other keys still down)
 };
 
 static Voice voices[NUM_VOICES];
@@ -203,6 +204,7 @@ static void voices_init(void)
         voices[i].age       = 0;
         voices[i].is_noise  = 0;
         voices[i].gain      = 256;
+        voices[i].fast_rel  = 0;
     }
 }
 
@@ -259,8 +261,10 @@ static void note_on(int note)
         v = alloc_voice();
 
     voices[v].note      = (int8_t)note;
+    voices[v].phase     = 0;
     voices[v].env_level = 0;
     voices[v].env_stage = ENV_ATTACK;
+    voices[v].fast_rel  = 0;
     voices[v].age       = ++voice_age_counter;
 
     if (preset_idx == PRESET_DRUM) {
@@ -275,14 +279,35 @@ static void note_on(int note)
     }
 }
 
+static int count_held_notes(void)
+{
+    int n = 0;
+    for (int i = 0; i < NUM_VOICES; i++) {
+        if (voices[i].note >= 0 &&
+            voices[i].env_stage != ENV_IDLE &&
+            voices[i].env_stage != ENV_RELEASE)
+            n++;
+    }
+    return n;
+}
+
 static void note_off(int note)
 {
     int v = find_voice_for_note(note);
     if (v < 0) return;
-    /* Keep note id until envelope hits IDLE so we don't double-allocate
-     * or lose track mid-release (fixes ghost re-trigger on multi-key). */
-    if (voices[v].env_stage != ENV_IDLE)
-        voices[v].env_stage = ENV_RELEASE;
+    if (voices[v].env_stage == ENV_IDLE)
+        return;
+
+    /* If other keys are still held, snap this voice's release short so its
+     * long decay tail does not sit under the remaining note (the "extra
+     * note in the queue" on PAD/VLN/SAX/ORG). Solo release keeps normal ADSR. */
+    int others = count_held_notes();
+    /* count_held includes this voice if it was still gated — subtract self */
+    if (voices[v].env_stage != ENV_RELEASE)
+        others -= 1;
+
+    voices[v].fast_rel  = (others > 0) ? 1 : 0;
+    voices[v].env_stage = ENV_RELEASE;
 }
 
 extern "C" void I2S_Handler(void)
@@ -323,15 +348,23 @@ extern "C" void I2S_Handler(void)
             case ENV_SUSTAIN:
                 el = adsr->sustain;
                 break;
-            case ENV_RELEASE:
-                el -= adsr->release;
+            case ENV_RELEASE: {
+                int32_t rate = adsr->release;
+                if (v->fast_rel) {
+                    /* ~30–50 ms cut regardless of preset release */
+                    rate = rate * 10 + 40;
+                    if (rate < 80) rate = 80;
+                }
+                el -= rate;
                 if (el <= 0) {
                     el = 0;
                     v->env_stage = ENV_IDLE;
                     v->phase_inc = 0;
                     v->note      = -1;
+                    v->fast_rel  = 0;
                 }
                 break;
+            }
             default:
                 el = 0;
                 break;
@@ -637,13 +670,13 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
-    /* 2-sample debounce + release-priority anti-ghost.
-     * TM1638 / diode-less matrices often show a phantom press in the same
-     * scan as a real release when 2+ keys were held — that caused the
-     * "extra note when releasing the second key" bug in sustained modes. */
-    static uint8_t stable = 0;
-    static uint8_t candidate = 0;
-    static uint8_t cand_count = 0;
+    /* Debounce + release-priority anti-ghost + post-release press blanking.
+     * Ghost key-downs often appear 1–2 scans AFTER a real key-up when
+     * another key is still held. */
+    static uint8_t  stable = 0;
+    static uint8_t  candidate = 0;
+    static uint8_t  cand_count = 0;
+    static uint32_t press_block_until = 0;  /* millis() timestamp */
 
     uint8_t keys = keys_physical(tm_read_keys_raw());
     if (keys == candidate) {
@@ -656,24 +689,30 @@ static void tm_poll(void)
     if (cand_count < 3)
         return;
 
-    if (keys == stable)
+    if (keys == stable) {
+        tm_set_leds(keys);
         return;
+    }
 
     uint8_t pressed  = keys & ~stable;
     uint8_t released = stable & ~keys;
+    uint32_t now = millis();
 
-    /* If anything was released this frame, only process releases.
-     * Concurrent "presses" are almost always matrix ghosts. */
     if (released) {
         for (int i = 0; i < 8; i++) {
             if (released & (1u << i))
                 note_off(i);
         }
+        /* Ignore new presses for 50 ms — catches delayed matrix ghosts */
+        press_block_until = now + 50;
     } else if (pressed) {
-        for (int i = 0; i < 8; i++) {
-            if (pressed & (1u << i))
-                note_on(i);
+        if ((int32_t)(now - press_block_until) >= 0) {
+            for (int i = 0; i < 8; i++) {
+                if (pressed & (1u << i))
+                    note_on(i);
+            }
         }
+        /* else: drop ghost press */
     }
 
     tm_set_leds(keys);
