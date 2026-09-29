@@ -38,6 +38,15 @@ static constexpr int      PRESET_DRUM    = 7;  // index of drum mode
 static constexpr int      PRESET_SAX     = 5;
 static constexpr int      PRESET_VLN     = 6;
 
+// Temporary transport diagnostic. When enabled, a held key produces a
+// deterministic 523 Hz sine through the same ring buffer and I2S ISR.
+// This removes ADSR/voice allocation from the test without changing
+// the encoder or TM1638 handling.
+static constexpr bool AUDIO_DIAGNOSTIC_TONE = true;
+static constexpr uint32_t DIAG_PHASE_INC =
+    (uint32_t)(((uint64_t)523 << 32) / SAMPLE_RATE_HZ);
+static uint32_t diag_phase = 0;
+
 static constexpr int32_t SINE_PEAK = 280000000;
 static constexpr int32_t ENV_ONE   = 65536;
 
@@ -291,18 +300,6 @@ static void note_on(int note)
     }
 }
 
-static int count_held_notes(void)
-{
-    int n = 0;
-    for (int i = 0; i < NUM_VOICES; i++) {
-        if (voices[i].note >= 0 &&
-            voices[i].env_stage != ENV_IDLE &&
-            voices[i].env_stage != ENV_RELEASE)
-            n++;
-    }
-    return n;
-}
-
 static void note_off(int note)
 {
     int v = find_voice_for_note(note);
@@ -313,6 +310,24 @@ static void note_off(int note)
 
 static int32_t synth_next_sample()
 {
+    if (AUDIO_DIAGNOSTIC_TONE) {
+        bool any_note = false;
+        for (int i = 0; i < NUM_VOICES; i++) {
+            if (voices[i].note >= 0 &&
+                voices[i].env_stage != ENV_IDLE &&
+                voices[i].env_stage != ENV_RELEASE) {
+                any_note = true;
+                break;
+            }
+        }
+
+        if (!any_note)
+            return 0;
+
+        int32_t sample = sine_lookup(diag_phase);
+        diag_phase += DIAG_PHASE_INC;
+        return (int32_t)(((int64_t)sample * volume) / VOLUME_MAX);
+    }
     const Adsr *adsr = &PRESETS[preset_idx];
     int64_t mix = 0;
 
