@@ -126,7 +126,7 @@ struct Adsr {
 /*
  * Rates per sample at 46.875 kHz. Time ≈ ENV_ONE / rate / SAMPLE_RATE seconds.
  *
- * ORG – instant on, full sustain, ~0.3 s release
+ * ORG – ~90 ms attack, full sustain, ~2.2 s release; drawbar-style spectrum
  * PLK – instant on, ~15 ms decay to silence
  * PAD – ~1.0 s attack, full sustain, ~2 s release
  * BRS – ~0.2 s attack, decay to 50%, medium release
@@ -141,7 +141,7 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     // continues to zero after note_off().
     //
     // attack  decay  sustain           release
-    { 4096,    256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
+    { 512,     256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
     { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
@@ -211,6 +211,7 @@ static inline int32_t sine_lookup_fast(uint32_t ph)
     return sine_table[(ph >> 22) & (SINE_LEN - 1)];
 }
 
+static int32_t org_table[SINE_LEN];
 static int32_t sax_table[SINE_LEN];
 static int32_t vln_table[SINE_LEN];
 
@@ -220,10 +221,20 @@ static void instrument_tables_init()
         const double a = 2.0 * M_PI * (double)i / (double)SINE_LEN;
 
         // Precomputed timbres keep the audio render path to one table lookup.
-        // Coefficients are deliberately modest and normalized.
-        // Deliberately distinct spectra: SAX is bright/odd-harmonic rich;
-        // violin is richer in upper harmonics. These are precomputed so the
-        // audio loop remains inexpensive.
+        // ORG uses a drawbar-style additive spectrum: strong fundamental,
+        // octave, fifth, upper octave and higher upper partials. This is a
+        // static Hammond/pipe-organ approximation rather than a sine wave.
+        double org = 1.00 * sin(a)
+                   + 0.72 * sin(2.0 * a)
+                   + 0.48 * sin(3.0 * a)
+                   + 0.34 * sin(4.0 * a)
+                   + 0.24 * sin(5.0 * a)
+                   + 0.18 * sin(6.0 * a)
+                   + 0.13 * sin(8.0 * a)
+                   + 0.09 * sin(10.0 * a)
+                   + 0.06 * sin(12.0 * a)
+                   + 0.035 * sin(16.0 * a);
+
         double sax = sin(a)
                   + 0.55 * sin(3.0 * a)
                   + 0.30 * sin(5.0 * a)
@@ -237,6 +248,7 @@ static void instrument_tables_init()
                   + 0.25 * sin(5.0 * a)
                   + 0.15 * sin(6.0 * a);
 
+        org_table[i] = (int32_t)(org * (double)SINE_PEAK / 3.055);
         sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
         vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
     }
@@ -430,7 +442,9 @@ static int32_t synth_next_sample()
             int32_t n = next_noise() >> 4;
             raw = (sine >> 1) + n;
         } else {
-            if (preset_idx == PRESET_SAX)
+            if (preset_idx == 0)
+                raw = instrument_lookup(org_table, v->phase);
+            else if (preset_idx == PRESET_SAX)
                 raw = instrument_lookup(sax_table, v->phase);
             else if (preset_idx == PRESET_VLN)
                 raw = instrument_lookup(vln_table, v->phase);
