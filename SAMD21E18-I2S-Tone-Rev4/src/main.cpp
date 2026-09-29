@@ -346,12 +346,7 @@ static int32_t synth_next_sample/()
             el = adsr->sustain;
             break;
         case ENV_RELEASE: {
-            int32_t rate = adsr->release;
-            if (v->fast_rel) {
-                rate = rate * 10 + 40;
-                if (rate < 80) rate = 80;
-            }
-            el -= rate;
+            el -= adsr->release;
             if (el <= 0) {
                 el = 0;
                 v->env_stage = ENV_IDLE;
