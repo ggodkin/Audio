@@ -42,7 +42,7 @@ static constexpr int      PRESET_VLN     = 6;
 // deterministic 523 Hz sine through the same ring buffer and I2S ISR.
 // This removes ADSR/voice allocation from the test without changing
 // the encoder or TM1638 handling.
-static constexpr bool AUDIO_DIAGNOSTIC_TONE = true;
+static constexpr bool AUDIO_DIAGNOSTIC_TONE = false;
 static constexpr uint32_t DIAG_PHASE_INC =
     (uint32_t)(((uint64_t)523 << 32) / SAMPLE_RATE_HZ);
 static uint32_t diag_phase = 0;
@@ -171,7 +171,7 @@ static volatile int32_t  noise_lpf  = 0;         // one-pole low-pass state
 
 // Audio producer/consumer buffer. The main loop renders audio; the I2S ISR
 // only moves already-rendered samples into the I2S DATA register.
-static constexpr uint16_t AUDIO_BUFFER_FRAMES = 512;
+static constexpr uint16_t AUDIO_BUFFER_FRAMES = 1024;
 static constexpr uint16_t AUDIO_BUFFER_MASK   = AUDIO_BUFFER_FRAMES - 1;
 static int32_t audio_buffer[AUDIO_BUFFER_FRAMES];
 static volatile uint16_t audio_read_index  = 0;
@@ -842,12 +842,14 @@ void loop()
     // The buffered audio producer still runs between polls, outside the I2S ISR.
     bool changed = false;
 
+    // Keep the producer running continuously. The previous 200 us delay
+    // artificially limited the available CPU time for the 4-voice synth and
+    // could allow the audio queue to drain between fills.
     for (int i = 0; i < 40; i++) {
         if (encoder_poll())
             changed = true;
 
         audio_buffer_fill(32);
-        delayMicroseconds(200);
     }
 
     tm_poll();
