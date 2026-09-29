@@ -14,6 +14,23 @@ Bare ATSAMD21E18A I2S synthesizer for MAX98357A.
 - The current polyphony test uses a lightweight sine oscillator in place of the instrument DSP so CPU headroom can be evaluated independently of the more expensive instrument algorithms.
 - 31.25 kHz was selected after four voices at 46.875 kHz caused audio-buffer starvation/hiss; four voices now operate cleanly at the lower rate.
 
+## Drum voices
+
+The DRM preset uses eight drum voices:
+
+| Key | Sound | Synthesis |
+|---|---|---|
+| S1 | Kick | Short downward pitch-swept sine body; no broadband noise |
+| S2 | Snare | Short sine body |
+| S3 | Hi-hat | 7 kHz carrier plus controlled filtered noise |
+| S4 | Clap | Short sine body |
+| S5 | Low tom | Short sine body |
+| S6 | Mid tom | Short sine body |
+| S7 | Rim | Short sine body |
+| S8 | Crash | 4.5 kHz carrier plus controlled filtered noise |
+
+S1 is intentionally noise-free. S3 and S8 are the only drum voices using the noise source, and their noise contribution is kept below the carrier to avoid excessive broadband hiss.
+
 ## Envelope system
 
 ADSR timing is now defined in milliseconds rather than as raw per-sample increments. The firmware converts the requested times to fixed-point envelope rates using the current audio sample rate. This keeps the intended envelope timing stable if the I2S sample rate is changed.
