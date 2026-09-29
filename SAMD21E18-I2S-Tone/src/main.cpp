@@ -115,8 +115,8 @@ struct Adsr {
  * PAD – ~1.0 s attack, full sustain, ~2 s release
  * BRS – ~0.2 s attack, decay to 50%, medium release
  * PNO – fast attack, slow decay while held, faster cut on release
- * SAX – medium attack, full sustain, medium release (+ 2nd harmonic)
- * VLN – slow bow attack, full sustain, longer release (+ 2nd harmonic)
+ * SAX – medium attack, full sustain, medium release
+ * VLN – slow bow attack, full sustain, longer release
  * DRM – instant on, ~40 ms decay (percussive)
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
@@ -334,6 +334,7 @@ extern "C" void I2S_Handler(void)
     if (i2s_slot == 0) {
         const Adsr *adsr = &PRESETS[preset_idx];
         int64_t mix = 0;
+        int active = 0;
 
         for (int i = 0; i < NUM_VOICES; i++) {
             Voice *v = &voices[i];
@@ -397,30 +398,31 @@ extern "C" void I2S_Handler(void)
                 int32_t n = next_noise() >> 4;   // small noise dusting
                 raw = (s >> 1) + n;              // mostly sine, headroom left
             } else {
+                /* Pure sine for all melody presets (harmonics caused HF hiss
+                 * when 3–4 voices summed and clipped). Timbre = ADSR only. */
                 raw = sine_lookup(v->phase);
-                /* Sax / violin: very quiet 2nd harmonic only (no 3rd — was harsh
-                 * and clipped when two notes sustained). */
-                if (preset_idx == PRESET_SAX || preset_idx == PRESET_VLN) {
-                    int32_t h2 = sine_lookup(v->phase << 1) >> 4;  // -24 dB
-                    raw = (raw >> 1) + h2;  // ~0.5 fund + tiny partial
-                }
             }
             /* env * gain (256 = unity) */
             int64_t scaled = ((int64_t)raw * el) >> 16;
             scaled = (scaled * v->gain) >> 8;
             mix += scaled;
+            active++;
             v->phase += v->phase_inc;
         }
 
-        /* Normalize: drums stay loud; melody divide by voice count */
-        if (preset_idx == PRESET_DRUM)
-            mix = (mix * 5) / 4;
-        else
-            mix /= NUM_VOICES;
+        /* Normalize by how many voices actually sounded this sample */
+        if (preset_idx == PRESET_DRUM) {
+            if (active > 0)
+                mix = (mix * 5) / (4 * active);
+        } else {
+            if (active > 0)
+                mix /= active;
+        }
         mix = (mix * volume) / VOLUME_MAX;
 
-        if (mix >  1800000000LL) mix =  1800000000LL;
-        if (mix < -1800000000LL) mix = -1800000000LL;
+        /* Soft clamp — avoid hard clip (harsh HF) */
+        if (mix >  1500000000LL) mix =  1500000000LL;
+        if (mix < -1500000000LL) mix = -1500000000LL;
 
         i2s_hold = (int32_t)mix;
         I2S->DATA[1].reg = (uint32_t)(int32_t)mix;
@@ -683,57 +685,38 @@ static uint8_t keys_physical(uint8_t raw)
 
 static void tm_poll(void)
 {
-    /* Debounce + release-priority anti-ghost.
-     * Critical: on release frames, only clear released bits from `stable`.
-     * Never adopt the raw scan into stable when it may contain matrix ghosts. */
-    static uint8_t  stable = 0;
-    static uint8_t  candidate = 0;
-    static uint8_t  cand_count = 0;
-    static uint32_t press_block_until = 0;
+    /* Per-key integrate-and-dump debounce.
+     * Each key must be stably down/up for KEY_THRESH consecutive polls
+     * before note_on / note_off. Single-scan matrix ghosts never fire. */
+    static constexpr uint8_t KEY_THRESH = 5;
+    static uint8_t debounced = 0;     /* software held mask */
+    static uint8_t cnt[8] = {0};      /* 0 = confirmed up, KEY_THRESH = confirmed down */
 
-    uint8_t keys = keys_physical(tm_read_keys_raw());
-    if (keys == candidate) {
-        if (cand_count < 3)
-            cand_count++;
-    } else {
-        candidate = keys;
-        cand_count = 1;
-    }
-    if (cand_count < 3)
-        return;
+    uint8_t raw = keys_physical(tm_read_keys_raw());
 
-    if (keys == stable) {
-        tm_set_leds(stable);
-        return;
-    }
-
-    uint8_t pressed  = keys & ~stable;
-    uint8_t released = stable & ~keys;
-    uint32_t now = millis();
-
-    if (released) {
-        for (int i = 0; i < 8; i++) {
-            if (released & (1u << i))
-                note_off(i);
+    for (int i = 0; i < 8; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (raw & bit) {
+            if (cnt[i] < KEY_THRESH) {
+                cnt[i]++;
+                if (cnt[i] == KEY_THRESH && !(debounced & bit)) {
+                    debounced |= bit;
+                    note_on(i);
+                }
+            }
+        } else {
+            if (cnt[i] > 0) {
+                cnt[i]--;
+                if (cnt[i] == 0 && (debounced & bit)) {
+                    debounced &= (uint8_t)~bit;
+                    note_off(i);
+                }
+            }
         }
-        press_block_until = now + 80;
-        /* Drop only the keys that went up — keep held keys, ignore ghosts */
-        stable = stable & ~released;
-        tm_set_leds(stable);
-        return;
     }
 
-    if (pressed && (int32_t)(now - press_block_until) >= 0) {
-        for (int i = 0; i < 8; i++) {
-            if (pressed & (1u << i))
-                note_on(i);
-        }
-        stable = stable | pressed;
-    }
-
-    tm_set_leds(stable);
+    tm_set_leds(debounced);
 }
-
 static void wait_gclk(void)
 {
     for (uint32_t i = 0; i < 100000u && GCLK->STATUS.bit.SYNCBUSY; i++) {}
