@@ -136,14 +136,18 @@ struct Adsr {
  * DRM – instant on, ~40 ms decay (percussive)
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
+    // Rates are fixed-point envelope increments per rendered sample.
+    // The envelope state machine reaches SUSTAIN explicitly; RELEASE always
+    // continues to zero after note_off().
+    //
     // attack  decay  sustain           release
     { 4096,    256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
     { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
     { 8000,      3,   0,                 40, { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
-    {   80,     30,   ENV_ONE,          25,  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
-    {   10,     20,   ENV_ONE,          20,  { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
+    {   80,    120,   ENV_ONE * 3 / 4,   18, { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
+    {   40,     80,   ENV_ONE * 3 / 4,   12, { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
     { 8192,     50,   0,                200, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
