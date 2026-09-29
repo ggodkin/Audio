@@ -543,15 +543,19 @@ static int32_t synth_next_sample()
             // so the sound has continuously changing motion instead of a
             // static vibrato effect.
             const int32_t trem = sine_lookup_fast(organ_tremolo_phase);
-            const int32_t trem_gain = ENV_ONE + (trem >> 4);
-            raw = (int32_t)(((int64_t)raw * trem_gain) >> 16);
+            // Keep the hot path 32-bit on Cortex-M0+. trem_gain is scaled
+            // to 8 fractional bits before multiplication, avoiding another
+            // expensive 64-bit multiply for every voice/sample.
+            const int32_t trem_gain_q8 = 256 + (trem >> 12);
+            raw = (int32_t)(((raw >> 8) * trem_gain_q8) >> 8);
         }
 
         /* Preserve the known-good Rev2 fixed-point scaling exactly. The
          * synthesis now runs outside the I2S ISR, so the M0+ 64-bit math
          * no longer consumes the real-time interrupt budget. */
         int64_t scaled = ((int64_t)raw * el) >> 16;
-        scaled = (scaled * v->gain) >> 8;
+        if (v->gain != 256)
+            scaled = (scaled * v->gain) >> 8;
         mix += scaled;
         v->phase += v->phase_inc;
     }
