@@ -6,13 +6,14 @@
  * Encoder: PA14/PA15 = A/B   PA22 = push (mode toggle)
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * Display left 4: VOL / ORG / PLK / PAD / BRS
- * Display right 4: volume 0–64 or preset index 1–4
+ * Display left 4: VOL / ORG / PLK / PAD / BRS / PNO / DRM
+ * Display right 4: volume 0–64 or preset index 1–6
  *
  * Encoder push: toggle volume ↔ preset select
  * Encoder turn: volume (fine) or preset (1 step / detent)
  *
- * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6
+ * S1…S8 → C5 D5 E5 F5 G5 A5 B5 C6  (melody presets)
+ *         Kick Snare HH Clap Tom1 Tom2 Rim Crash  (drum mode)
  */
 
 #include <Arduino.h>
@@ -24,8 +25,9 @@ static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
 static constexpr int      NUM_VOICES     = 4;
-static constexpr int      NUM_PRESETS    = 4;
+static constexpr int      NUM_PRESETS    = 6;
 static constexpr int      PRESET_EDGES   = 4;  // quadrature edges per detent
+static constexpr int      PRESET_DRUM    = 5;  // index of drum mode
 
 static constexpr int32_t SINE_PEAK = 280000000;
 static constexpr int32_t ENV_ONE   = 65536;
@@ -34,6 +36,18 @@ static int32_t sine_table[SINE_LEN];
 
 static const uint16_t button_hz[8] = {
     523, 587, 659, 698, 784, 880, 988, 1047
+};
+
+/* Drum pitch map (Hz) – approximate classic kit tones */
+static const uint16_t drum_hz[8] = {
+    60,   // Kick
+    180,  // Snare body
+    8000, // Hi-hat (will be noise-dominated)
+    220,  // Clap
+    120,  // Tom low
+    180,  // Tom mid
+    400,  // Rim
+    6000  // Crash (noise + tone)
 };
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -48,6 +62,8 @@ static constexpr uint8_t SEG_D = 0x5E;
 static constexpr uint8_t SEG_G = 0x3D;
 static constexpr uint8_t SEG_K = 0x75;
 static constexpr uint8_t SEG_L = 0x38;
+static constexpr uint8_t SEG_M = 0x37;
+static constexpr uint8_t SEG_N = 0x54;
 static constexpr uint8_t SEG_O = 0x3F;
 static constexpr uint8_t SEG_P = 0x73;
 static constexpr uint8_t SEG_R = 0x50;
@@ -71,6 +87,8 @@ struct Adsr {
  * PLK – instant on, ~15 ms decay to silence       (short pluck; no sustain)
  * PAD – ~1.0 s attack, full sustain, ~2 s release (slow swell)
  * BRS – ~0.2 s attack, decay to 50%, medium release
+ * PNO – fast attack, medium decay to low sustain, long release (piano-like)
+ * DRM – instant on, very fast decay, no sustain   (percussive drum hits)
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
     // attack  decay  sustain           release
@@ -78,6 +96,8 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
+    { 6000,     25,   ENV_ONE / 8,       6,  { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    { 8192,    400,   0,                800, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
@@ -93,13 +113,26 @@ struct Voice {
     volatile uint8_t  env_stage;
     volatile int8_t   note;
     volatile uint32_t age;
+    volatile uint8_t  is_noise;   // 1 = noise source (hi-hat / crash)
 };
 
 static Voice voices[NUM_VOICES];
 static volatile uint32_t voice_age_counter = 0;
+static volatile uint32_t noise_lfsr = 0xACE1u;  // 16-bit LFSR seed
 
 static volatile uint8_t i2s_slot = 0;
 static volatile int32_t i2s_hold = 0;
+
+/* Simple 16-bit LFSR white noise */
+static inline int32_t next_noise(void)
+{
+    uint32_t l = noise_lfsr;
+    uint32_t bit = ((l >> 0) ^ (l >> 2) ^ (l >> 3) ^ (l >> 5)) & 1u;
+    l = (l >> 1) | (bit << 15);
+    noise_lfsr = l;
+    /* Map 0..65535 → approx ±SINE_PEAK/2 */
+    return (int32_t)(((int32_t)l - 32768) * (SINE_PEAK / 32768));
+}
 
 static void sine_table_init(void)
 {
@@ -132,6 +165,7 @@ static void voices_init(void)
         voices[i].env_stage = ENV_IDLE;
         voices[i].note      = -1;
         voices[i].age       = 0;
+        voices[i].is_noise  = 0;
     }
 }
 
@@ -174,10 +208,19 @@ static void note_on(int note)
         v = alloc_voice();
 
     voices[v].note      = (int8_t)note;
-    voices[v].phase_inc = hz_to_inc(button_hz[note]);
     voices[v].env_level = 0;
     voices[v].env_stage = ENV_ATTACK;
     voices[v].age       = ++voice_age_counter;
+
+    if (preset_idx == PRESET_DRUM) {
+        /* Hi-hat (2) and Crash (7) use noise; others use sine body */
+        voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
+        voices[v].phase_inc = hz_to_inc(drum_hz[note]);
+        /* Slight pitch drop for kick/toms feels more natural – handled by short env */
+    } else {
+        voices[v].is_noise  = 0;
+        voices[v].phase_inc = hz_to_inc(button_hz[note]);
+    }
 }
 
 static void note_off(int note)
@@ -242,7 +285,15 @@ extern "C" void I2S_Handler(void)
             if (el == 0)
                 continue;
 
-            int32_t raw = sine_lookup(v->phase);
+            int32_t raw;
+            if (v->is_noise) {
+                /* Mix noise with a little sine body for metallic character */
+                int32_t n = next_noise();
+                int32_t s = sine_lookup(v->phase);
+                raw = (n >> 1) + (s >> 2);   // mostly noise
+            } else {
+                raw = sine_lookup(v->phase);
+            }
             mix += ((int64_t)raw * el) >> 16;
             v->phase += v->phase_inc;
         }
