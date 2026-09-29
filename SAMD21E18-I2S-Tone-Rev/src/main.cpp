@@ -130,32 +130,40 @@ struct Adsr {
     uint8_t label[4];
 };
 
+// Envelope rates are specified in milliseconds and converted to fixed-point
+// increments for the current SAMPLE_RATE_HZ. This keeps the musical timing
+// stable if the audio sample rate changes.
+//
+// attack_ms / decay_ms / release_ms are approximate times to traverse the
+// corresponding envelope range. A zero value means an immediate transition.
+static constexpr int32_t env_rate_from_ms(uint32_t ms)
+{
+    return (ms == 0) ? ENV_ONE : (int32_t)((ENV_ONE * 1000ULL) /
+                                           ((uint64_t)ms * SAMPLE_RATE_HZ));
+}
+
 /*
- * Rates per sample at 46.875 kHz. Time ≈ ENV_ONE / rate / SAMPLE_RATE seconds.
+ * Instrument envelopes, expressed in milliseconds so timing is independent
+ * of the I2S sample rate:
  *
- * ORG – immediate attack, full sustain, ~2.2 s release; Hammond-style drawbars
- * PLK – instant on, ~15 ms decay to silence
- * PAD – ~1.0 s attack, full sustain, ~2 s release
- * BRS – ~0.2 s attack, decay to 50%, medium release
- * PNO – fast attack, slow decay while held, faster cut on release
- * SAX – medium attack, full sustain, medium release (+ 2nd harmonic)
- * VLN – slow bow attack, full sustain, longer release (+ 2nd harmonic)
- * DRM – instant on, ~40 ms decay (percussive)
+ * ORG – fast attack, full sustain, ~2 s release
+ * PLK – instant attack, ~180 ms decay, short release
+ * PAD – ~1 s attack, full sustain, ~2.5 s release
+ * BRS – ~150 ms attack, ~500 ms decay toward 50%, ~1 s release
+ * PNO – fast attack, ~5 s decay to silence, ~1 s release
+ * SAX – ~70 ms attack, ~300 ms decay toward 75%, ~700 ms release
+ * VLN – ~120 ms attack, ~500 ms decay toward 75%, ~2.5 s release
+ * DRM – instant attack, ~150 ms decay, no audible release
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
-    // Rates are fixed-point envelope increments per rendered sample.
-    // The envelope state machine reaches SUSTAIN explicitly; RELEASE always
-    // continues to zero after note_off().
-    //
-    // attack  decay  sustain           release
-    { 1024,    256,   ENV_ONE,          8,   { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
-    { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
-    {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
-    {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
-    { 8000,      3,   0,                 40, { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
-    {   80,    120,   ENV_ONE * 3 / 4,   18, { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
-    {   40,     80,   ENV_ONE * 3 / 4,   12, { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
-    { 8192,     50,   0,                200, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
+    { env_rate_from_ms(2),    env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2000), { SEG_O, SEG_R, SEG_G, SEG_BLANK } }, // ORG
+    { env_rate_from_ms(1),    env_rate_from_ms(180),  0,                  env_rate_from_ms(250),  { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
+    { env_rate_from_ms(1000), env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2500), { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
+    { env_rate_from_ms(150),  env_rate_from_ms(500), ENV_ONE / 2,         env_rate_from_ms(1000), { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
+    { env_rate_from_ms(5),    env_rate_from_ms(5000), 0,                  env_rate_from_ms(1000), { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    { env_rate_from_ms(70),   env_rate_from_ms(300), ENV_ONE * 3 / 4,     env_rate_from_ms(700),  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
+    { env_rate_from_ms(120),  env_rate_from_ms(500), ENV_ONE * 3 / 4,     env_rate_from_ms(2500), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
+    { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(50),   { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
