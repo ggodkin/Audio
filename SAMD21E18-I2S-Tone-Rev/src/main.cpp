@@ -206,6 +206,11 @@ static void sine_table_init(void)
     }
 }
 
+static inline int32_t sine_lookup_fast(uint32_t ph)
+{
+    return sine_table[(ph >> 22) & (SINE_LEN - 1)];
+}
+
 static int32_t sine_lookup(uint32_t ph)
 {
     uint32_t idx  = ph >> 22;
@@ -391,15 +396,15 @@ static int32_t synth_next_sample()
         } else {
             raw = sine_lookup(v->phase);
 
-            // Add restrained harmonics for the two instrument presets.
-            // Keep the summed waveform normalized so harmonics cannot
-            // overflow the intended oscillator range.
+            // Instrument harmonics use table-index lookup rather than the
+            // interpolated 64-bit lookup. This keeps the render path cheap
+            // enough to sustain the I2S producer rate on the SAMD21.
             if (preset_idx == PRESET_SAX) {
-                const int32_t h2 = sine_lookup(v->phase << 1);
-                const int32_t h3 = sine_lookup(v->phase * 3u);
+                const int32_t h2 = sine_lookup_fast(v->phase << 1);
+                const int32_t h3 = sine_lookup_fast(v->phase * 3u);
                 raw = (raw * 3 + h2 + h3) / 5;
             } else if (preset_idx == PRESET_VLN) {
-                const int32_t h2 = sine_lookup(v->phase << 1);
+                const int32_t h2 = sine_lookup_fast(v->phase << 1);
                 raw = (raw * 3 + h2) / 4;
             }
         }
