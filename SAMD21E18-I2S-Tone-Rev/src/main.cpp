@@ -138,10 +138,13 @@ struct Adsr {
 // corresponding envelope range. A zero value means an immediate transition.
 static constexpr int32_t env_rate_from_ms(uint32_t ms)
 {
-    if (ms == 0) return ENV_ONE;
-    const uint64_t rate = (ENV_ONE * 1000ULL) /
-                          ((uint64_t)ms * SAMPLE_RATE_HZ);
-    return (int32_t)(rate == 0 ? 1 : rate);
+    return (ms == 0)
+        ? ENV_ONE
+        : (int32_t)((((ENV_ONE * 1000ULL) /
+                       ((uint64_t)ms * SAMPLE_RATE_HZ)) == 0)
+                    ? 1
+                    : ((ENV_ONE * 1000ULL) /
+                       ((uint64_t)ms * SAMPLE_RATE_HZ)));
 }
 
 /*
