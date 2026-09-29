@@ -396,16 +396,16 @@ static int32_t synth_next_sample()
         } else {
             raw = sine_lookup(v->phase);
 
-            // Instrument harmonics use table-index lookup rather than the
-            // interpolated 64-bit lookup. This keeps the render path cheap
-            // enough to sustain the I2S producer rate on the SAMD21.
+            // Keep the basic oscillator stable while we characterize
+            // instrument timbres. Use only one low-level harmonic at a time.
+            // This avoids the harsh multi-tone SAX result and keeps the
+            // render path comfortably within the SAMD21 budget.
             if (preset_idx == PRESET_SAX) {
                 const int32_t h2 = sine_lookup_fast(v->phase << 1);
-                const int32_t h3 = sine_lookup_fast(v->phase * 3u);
-                raw = (raw * 3 + h2 + h3) / 5;
+                raw = (raw * 7 + h2) / 8;
             } else if (preset_idx == PRESET_VLN) {
                 const int32_t h2 = sine_lookup_fast(v->phase << 1);
-                raw = (raw * 3 + h2) / 4;
+                raw = (raw * 7 + h2) / 8;
             }
         }
 
