@@ -50,6 +50,18 @@ static const uint16_t drum_hz[8] = {
     4500  // Crash (noise + tone)
 };
 
+/* Relative gain 0–256 (256 = unity). Kick boosted; noise pads attenuated. */
+static const uint16_t drum_gain[8] = {
+    384,  // Kick  – louder
+    256,  // Snare
+    140,  // Hi-hat – quieter (noise clips easily)
+    256,  // Clap
+    256,  // Tom low
+    256,  // Tom mid
+    256,  // Rim
+    140,  // Crash – quieter (noise)
+};
+
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 static const uint8_t SEG_DIGIT[10] = {
@@ -114,6 +126,7 @@ struct Voice {
     volatile int8_t   note;
     volatile uint32_t age;
     volatile uint8_t  is_noise;   // 1 = noise source (hi-hat / crash)
+    volatile uint16_t gain;       // 256 = unity
 };
 
 static Voice voices[NUM_VOICES];
@@ -166,6 +179,7 @@ static void voices_init(void)
         voices[i].note      = -1;
         voices[i].age       = 0;
         voices[i].is_noise  = 0;
+        voices[i].gain      = 256;
     }
 }
 
@@ -216,10 +230,11 @@ static void note_on(int note)
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
         voices[v].phase_inc = hz_to_inc(drum_hz[note]);
-        /* Slight pitch drop for kick/toms feels more natural – handled by short env */
+        voices[v].gain      = drum_gain[note];
     } else {
         voices[v].is_noise  = 0;
         voices[v].phase_inc = hz_to_inc(button_hz[note]);
+        voices[v].gain      = 256;
     }
 }
 
@@ -287,14 +302,17 @@ extern "C" void I2S_Handler(void)
 
             int32_t raw;
             if (v->is_noise) {
-                /* Mix noise with a little sine body for metallic character */
-                int32_t n = next_noise();
-                int32_t s = sine_lookup(v->phase);
-                raw = (n >> 1) + (s >> 2);   // mostly noise
+                /* Noise attenuated hard — full-scale noise clips easily */
+                int32_t n = next_noise() >> 3;   // 1/8 amplitude
+                int32_t s = sine_lookup(v->phase) >> 3;
+                raw = n + s;
             } else {
                 raw = sine_lookup(v->phase);
             }
-            mix += ((int64_t)raw * el) >> 16;
+            /* env * gain (256 = unity) */
+            int64_t scaled = ((int64_t)raw * el) >> 16;
+            scaled = (scaled * v->gain) >> 8;
+            mix += scaled;
             v->phase += v->phase_inc;
         }
 
