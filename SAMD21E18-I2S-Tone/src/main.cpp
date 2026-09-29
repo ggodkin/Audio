@@ -40,14 +40,14 @@ static const uint16_t button_hz[8] = {
 
 /* Drum pitch map (Hz) – approximate classic kit tones */
 static const uint16_t drum_hz[8] = {
-    60,   // Kick
-    180,  // Snare body
-    8000, // Hi-hat (will be noise-dominated)
-    220,  // Clap
-    120,  // Tom low
-    180,  // Tom mid
-    400,  // Rim
-    6000  // Crash (noise + tone)
+    80,   // Kick (raised a bit for small speakers)
+    200,  // Snare body
+    6000, // Hi-hat (noise-dominated)
+    280,  // Clap
+    140,  // Tom low
+    200,  // Tom mid
+    500,  // Rim
+    4500  // Crash (noise + tone)
 };
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -87,8 +87,8 @@ struct Adsr {
  * PLK – instant on, ~15 ms decay to silence       (short pluck; no sustain)
  * PAD – ~1.0 s attack, full sustain, ~2 s release (slow swell)
  * BRS – ~0.2 s attack, decay to 50%, medium release
- * PNO – fast attack, medium decay to low sustain, long release (piano-like)
- * DRM – instant on, very fast decay, no sustain   (percussive drum hits)
+ * PNO – fast attack, slow decay to silence while held, faster cut on release
+ * DRM – instant on, ~40 ms decay, no sustain      (audible drum hits)
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
     // attack  decay  sustain           release
@@ -96,8 +96,8 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     { 8192,    150,   0,                200, { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
-    { 6000,     25,   ENV_ONE / 8,       6,  { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
-    { 8192,    400,   0,                800, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
+    { 8000,      3,   0,                 40, { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    { 8192,     50,   0,                200, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
@@ -298,7 +298,11 @@ extern "C" void I2S_Handler(void)
             v->phase += v->phase_inc;
         }
 
-        mix /= NUM_VOICES;
+        /* Drums: fewer simultaneous hits — keep louder; melody: average voices */
+        if (preset_idx == PRESET_DRUM)
+            mix = (mix * 3) / 2;   /* slight boost, no /NUM_VOICES */
+        else
+            mix /= NUM_VOICES;
         mix = (mix * volume) / VOLUME_MAX;
 
         if (mix >  2147483647LL) mix =  2147483647LL;
