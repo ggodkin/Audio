@@ -31,6 +31,8 @@ static constexpr uint32_t SAMPLE_RATE_HZ =
 static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
+// Maximum simultaneous notes. The mixer renders every active voice into
+// one PCM sample before the I2S ISR sends it to the MAX98357A.
 static constexpr int      NUM_VOICES     = 4;
 static constexpr int      NUM_PRESETS    = 8;
 static constexpr int      PRESET_EDGES   = 4;  // quadrature edges per detent
@@ -418,6 +420,9 @@ static void note_off(int note)
         voices[v].env_stage = ENV_RELEASE;
 }
 
+// Four independent voice slots are mixed sample-by-sample. Voice allocation
+// is deliberately separate from the I2S ISR so polyphony cannot block the
+// audio transport interrupt.
 static int32_t synth_next_sample()
 {
     if (AUDIO_DIAGNOSTIC_TONE) {
