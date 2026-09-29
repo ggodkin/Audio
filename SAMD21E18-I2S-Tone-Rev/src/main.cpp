@@ -217,6 +217,7 @@ static int32_t vln_table[SINE_LEN];
 static int32_t organ_harmonic_table[SINE_LEN];
 static int32_t organ_sub_table[SINE_LEN];      // 16' (0.5x), weighted
 static int32_t organ_5th3_table[SINE_LEN];     // 5 1/3' (1.5x), weighted
+static int32_t organ_perc_table[SINE_LEN];     // 4' percussion
 
 // Hammond-style modulation. A small ~6 Hz pitch wobble is much more
 // characteristic of a tonewheel organ than a perfectly static oscillator.
@@ -224,6 +225,10 @@ static constexpr uint32_t ORGAN_VIBRATO_HZ = 6;
 static constexpr uint32_t ORGAN_LFO_INC =
     (uint32_t)(((uint64_t)ORGAN_VIBRATO_HZ << 32) / SAMPLE_RATE_HZ);
 static uint32_t organ_lfo_phase = 0;
+static constexpr uint32_t ORGAN_TREMOLO_HZ = 7;
+static constexpr uint32_t ORGAN_TREMOLO_INC =
+    (uint32_t)(((uint64_t)ORGAN_TREMOLO_HZ << 32) / SAMPLE_RATE_HZ);
+static uint32_t organ_tremolo_phase = 0;
 
 static void instrument_tables_init()
 {
@@ -519,6 +524,15 @@ static int32_t synth_next_sample()
             } else {
                 raw = sine_lookup(voice_phase);
             }
+        }
+
+        if (preset_idx == 0) {
+            // Rotary-speaker-style tremolo. This is intentionally subtle
+            // because the signal is mono; the pitch LFO above supplies the
+            // remaining motion.
+            const int32_t trem = sine_lookup_fast(organ_tremolo_phase);
+            const int32_t trem_gain = ENV_ONE + (trem >> 4);
+            raw = (int32_t)(((int64_t)raw * trem_gain) >> 16);
         }
 
         /* Preserve the known-good Rev2 fixed-point scaling exactly. The
