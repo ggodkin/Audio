@@ -334,7 +334,6 @@ extern "C" void I2S_Handler(void)
     if (i2s_slot == 0) {
         const Adsr *adsr = &PRESETS[preset_idx];
         int64_t mix = 0;
-        int active = 0;
 
         for (int i = 0; i < NUM_VOICES; i++) {
             Voice *v = &voices[i];
@@ -398,29 +397,29 @@ extern "C" void I2S_Handler(void)
                 int32_t n = next_noise() >> 4;   // small noise dusting
                 raw = (s >> 1) + n;              // mostly sine, headroom left
             } else {
-                /* Pure sine for all melody presets (harmonics caused HF hiss
-                 * when 3–4 voices summed and clipped). Timbre = ADSR only. */
                 raw = sine_lookup(v->phase);
+                /* SAX only: tiny 2nd harmonic (-30 dB). Safe with fixed /NUM_VOICES. */
+                if (preset_idx == PRESET_SAX) {
+                    int32_t h2 = sine_lookup(v->phase << 1) >> 5;
+                    raw = raw + h2;
+                }
             }
             /* env * gain (256 = unity) */
             int64_t scaled = ((int64_t)raw * el) >> 16;
             scaled = (scaled * v->gain) >> 8;
             mix += scaled;
-            active++;
             v->phase += v->phase_inc;
         }
 
-        /* Normalize by how many voices actually sounded this sample */
-        if (preset_idx == PRESET_DRUM) {
-            if (active > 0)
-                mix = (mix * 5) / (4 * active);
-        } else {
-            if (active > 0)
-                mix /= active;
-        }
+        /* ALWAYS divide by NUM_VOICES — never by active count.
+         * Scaling by active made the remaining note jump ~2x louder when
+         * another key was released — heard as a ghost attack/note. */
+        if (preset_idx == PRESET_DRUM)
+            mix = (mix * 3) / (2 * NUM_VOICES);  /* drums a bit louder */
+        else
+            mix /= NUM_VOICES;
         mix = (mix * volume) / VOLUME_MAX;
 
-        /* Soft clamp — avoid hard clip (harsh HF) */
         if (mix >  1500000000LL) mix =  1500000000LL;
         if (mix < -1500000000LL) mix = -1500000000LL;
 
