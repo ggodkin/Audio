@@ -66,16 +66,28 @@ static const uint16_t button_hz[8] = {
 /* Drum pitch map (Hz) – approximate classic kit tones */
 /*
  * How each drum is synthesized:
- *   S1 Kick  – sine 150 Hz, gain 2.0x, pure tone body
+ *   S1 Kick  – 190→55 Hz sine pitch sweep, gain 2.0x, no noise
  *   S2 Snare – sine 200 Hz, gain 1.0x, pure tone
- *   S3 HH    – sine 7 kHz + light filtered noise, gain 1.1x (metallic)
+ *   S3 HH    – inharmonic 7 kHz partials + high-passed noise
  *   S4 Clap  – sine 280 Hz, gain 1.0x
  *   S5 TomL  – sine 160 Hz, gain 1.0x
  *   S6 TomM  – sine 220 Hz, gain 1.0x
  *   S7 Rim   – sine 500 Hz, gain 1.0x
- *   S8 Crash – sine 4.5 kHz + light filtered noise, gain 1.0x (metallic)
+ *   S8 Crash – inharmonic 4.5 kHz partials + high-passed noise
  * Drum envelopes are preset-specific; DRM is approximately 150 ms decay with no sustain.
  */
+static constexpr uint32_t KICK_START_HZ = 190;
+static constexpr uint32_t KICK_END_HZ   = 55;
+static constexpr uint32_t KICK_SWEEP_MS = 80;
+static constexpr uint32_t KICK_SWEEP_SAMPLES =
+    (SAMPLE_RATE_HZ * KICK_SWEEP_MS) / 1000;
+static constexpr uint32_t KICK_START_INC =
+    (uint32_t)(((uint64_t)KICK_START_HZ << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t KICK_END_INC =
+    (uint32_t)(((uint64_t)KICK_END_HZ << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t KICK_INC_STEP =
+    (KICK_START_INC - KICK_END_INC) / KICK_SWEEP_SAMPLES;
+
 static const uint16_t drum_hz[8] = {
     150,  // Kick
     200,  // Snare
@@ -216,11 +228,10 @@ static inline int32_t next_noise(void)
     uint32_t bit = ((l >> 0) ^ (l >> 2) ^ (l >> 3) ^ (l >> 5)) & 1u;
     l = (l >> 1) | (bit << 15);
     noise_lfsr = l;
-    /* ~±SINE_PEAK/4 */
+    /* Keep the raw noise modest, then high-pass it for percussion. */
     int32_t n = (int32_t)(((int32_t)l - 32768) * (SINE_PEAK / 131072));
-    /* simple one-pole: y += (x - y) / 4  — softens harsh digital noise */
-    noise_lpf += (n - noise_lpf) >> 2;
-    return noise_lpf;
+    noise_lpf += (n - noise_lpf) >> 3;
+    return n - noise_lpf;
 }
 
 static void sine_table_init(void)
@@ -421,7 +432,7 @@ static void note_on(int note)
     if (preset_idx == PRESET_DRUM) {
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
-        voices[v].phase_inc = hz_to_inc(drum_hz[note]);
+        voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
         voices[v].gain      = drum_gain[note];
     } else {
         voices[v].is_noise  = 0;
@@ -517,20 +528,24 @@ static int32_t synth_next_sample()
 
         int32_t raw;
         if (preset_idx == PRESET_DRUM && v->note == 0) {
-            // Kick: short downward pitch sweep plus sine body. The generic
-            // drum sine is too static and can sound buzzy; the sweep gives
-            // the kick its initial "thump" without adding broadband noise.
-            const uint32_t kick_drop =
-                (uint32_t)(((uint64_t)v->env_level * 180u) << 16) / ENV_ONE;
-            const uint32_t kick_phase =
-                v->phase + (kick_drop * v->phase >> 16);
-            raw = sine_lookup(kick_phase);
+            // Clean kick body. The phase increment is swept downward after
+            // mixing; this branch contains no noise or phase warping.
+            raw = sine_lookup(v->phase);
+        } else if (preset_idx == PRESET_DRUM && v->note == 2) {
+            // Hi-hat: inharmonic partials plus a small high-passed noise tail.
+            int32_t metal = sine_lookup_fast(v->phase);
+            metal += sine_lookup_fast(v->phase * 3u) >> 1;
+            metal += sine_lookup_fast(v->phase * 5u) >> 2;
+            raw = (metal >> 1) + (next_noise() >> 4);
+        } else if (preset_idx == PRESET_DRUM && v->note == 7) {
+            // Crash: broader inharmonic spectrum plus high-passed noise.
+            int32_t metal = sine_lookup_fast(v->phase);
+            metal += sine_lookup_fast(v->phase * 2u) >> 1;
+            metal += sine_lookup_fast(v->phase * 3u) >> 2;
+            metal += sine_lookup_fast(v->phase * 4u) >> 3;
+            raw = (metal >> 1) + (next_noise() >> 3);
         } else if (v->is_noise) {
-            int32_t sine = sine_lookup(v->phase);
-            int32_t n = next_noise();
-            // Keep the noise component deliberately below the carrier so
-            // S3/S8 remain metallic rather than becoming broadband hiss.
-            raw = (sine >> 1) + (n >> 5);
+            raw = next_noise() >> 2;
         } else {
             uint32_t voice_phase = v->phase;
 
@@ -597,6 +612,11 @@ static int32_t synth_next_sample()
             scaled = (scaled * v->gain) >> 8;
         mix += scaled;
         v->phase += v->phase_inc;
+        if (preset_idx == PRESET_DRUM && v->note == 0 &&
+            v->phase_inc > KICK_END_INC) {
+            uint32_t next_inc = v->phase_inc - KICK_INC_STEP;
+            v->phase_inc = (next_inc < KICK_END_INC) ? KICK_END_INC : next_inc;
+        }
     }
 
     // Keep a fixed headroom budget for the four-voice mixer. The organ
