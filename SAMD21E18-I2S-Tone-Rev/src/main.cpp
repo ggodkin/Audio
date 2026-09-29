@@ -555,7 +555,11 @@ static int32_t synth_next_sample()
         /* Preserve the known-good Rev2 fixed-point scaling exactly. The
          * synthesis now runs outside the I2S ISR, so the M0+ 64-bit math
          * no longer consumes the real-time interrupt budget. */
-        int64_t scaled = ((int64_t)raw * el) >> 16;
+        // Keep the per-voice amplitude scaling entirely in 32-bit math.
+        // On Cortex-M0+ this is substantially cheaper than a 64-bit multiply
+        // for every voice/sample, while retaining adequate 16-bit envelope
+        // resolution for the audio path.
+        int32_t scaled = (raw >> 8) * (el >> 8);
         if (v->gain != 256)
             scaled = (scaled * v->gain) >> 8;
         mix += scaled;
@@ -1007,7 +1011,7 @@ void loop()
         if (encoder_poll())
             changed = true;
 
-        audio_buffer_fill(32);
+        audio_buffer_fill(64);
     }
 
     tm_poll();
