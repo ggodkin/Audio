@@ -74,7 +74,7 @@ static const uint16_t button_hz[8] = {
  *   S6 TomM  – sine 220 Hz, gain 1.0x
  *   S7 Rim   – sine 500 Hz, gain 1.0x
  *   S8 Crash – sine 4.5 kHz + light filtered noise, gain 1.0x (metallic)
- * Envelope for all: global DRM ADSR (~40 ms decay, no sustain).
+ * Drum envelopes are preset-specific; DRM is approximately 150 ms decay with no sustain.
  */
 static const uint16_t drum_hz[8] = {
     150,  // Kick
@@ -91,7 +91,7 @@ static const uint16_t drum_hz[8] = {
 static const uint16_t drum_gain[8] = {
     512,  // Kick
     256,  // Snare
-    280,  // Hi-hat (was inaudible at 64)
+    240,  // Hi-hat
     256,  // Clap
     256,  // Tom low
     256,  // Tom mid
@@ -516,10 +516,21 @@ static int32_t synth_next_sample()
             continue;
 
         int32_t raw;
-        if (v->is_noise) {
+        if (preset_idx == PRESET_DRUM && v->note == 0) {
+            // Kick: short downward pitch sweep plus sine body. The generic
+            // drum sine is too static and can sound buzzy; the sweep gives
+            // the kick its initial "thump" without adding broadband noise.
+            const uint32_t kick_drop =
+                (uint32_t)(((uint64_t)v->env_level * 180u) << 16) / ENV_ONE;
+            const uint32_t kick_phase =
+                v->phase + (kick_drop * v->phase >> 16);
+            raw = sine_lookup(kick_phase);
+        } else if (v->is_noise) {
             int32_t sine = sine_lookup(v->phase);
-            int32_t n = next_noise() >> 4;
-            raw = (sine >> 1) + n;
+            int32_t n = next_noise();
+            // Keep the noise component deliberately below the carrier so
+            // S3/S8 remain metallic rather than becoming broadband hiss.
+            raw = (sine >> 1) + (n >> 5);
         } else {
             uint32_t voice_phase = v->phase;
 
