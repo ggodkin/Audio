@@ -6,8 +6,8 @@
  * Encoder: PA14/PA15 = A/B   PA22 = push (mode toggle)
  * TM1638:  PA16=STB  PA18=CLK  PA19=DIO
  *
- * Display left 4: VOL / ORG / PLK / PAD / BRS / PNO / DRM
- * Display right 4: volume 0–64 or preset index 1–6
+ * Display left 4: VOL / ORG / PLK / PAD / BRS / PNO / SAX / VLN / DRM
+ * Display right 4: volume 0–64 or preset index 1–8
  *
  * Encoder push: toggle volume ↔ preset select
  * Encoder turn: volume (fine) or preset (1 step / detent)
@@ -25,9 +25,11 @@ static constexpr uint32_t SINE_LEN       = 1024;
 static constexpr int      VOLUME_MAX     = 64;
 static constexpr int      VOLUME_STEP    = 1;
 static constexpr int      NUM_VOICES     = 4;
-static constexpr int      NUM_PRESETS    = 6;
+static constexpr int      NUM_PRESETS    = 8;
 static constexpr int      PRESET_EDGES   = 4;  // quadrature edges per detent
-static constexpr int      PRESET_DRUM    = 5;  // index of drum mode
+static constexpr int      PRESET_DRUM    = 7;  // index of drum mode
+static constexpr int      PRESET_SAX     = 5;
+static constexpr int      PRESET_VLN     = 6;
 
 static constexpr int32_t SINE_PEAK = 280000000;
 static constexpr int32_t ENV_ONE   = 65536;
@@ -40,26 +42,26 @@ static const uint16_t button_hz[8] = {
 
 /* Drum pitch map (Hz) – approximate classic kit tones */
 static const uint16_t drum_hz[8] = {
-    80,   // Kick (raised a bit for small speakers)
+    150,  // Kick – higher so small speakers can reproduce it
     200,  // Snare body
-    6000, // Hi-hat (noise-dominated)
+    8000, // Hi-hat carrier (noise-dominated)
     280,  // Clap
-    140,  // Tom low
-    200,  // Tom mid
+    160,  // Tom low
+    220,  // Tom mid
     500,  // Rim
-    4500  // Crash (noise + tone)
+    5000  // Crash carrier
 };
 
-/* Relative gain 0–256 (256 = unity). Kick boosted; noise pads attenuated. */
+/* Relative gain 0–256 (256 = unity). */
 static const uint16_t drum_gain[8] = {
-    384,  // Kick  – louder
+    512,  // Kick  – 2x (was soft)
     256,  // Snare
-    140,  // Hi-hat – quieter (noise clips easily)
+     64,  // Hi-hat – very quiet noise
     256,  // Clap
     256,  // Tom low
     256,  // Tom mid
     256,  // Rim
-    140,  // Crash – quieter (noise)
+     64,  // Crash – very quiet noise
 };
 
 static const uint8_t phys_bit[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -81,6 +83,7 @@ static constexpr uint8_t SEG_P = 0x73;
 static constexpr uint8_t SEG_R = 0x50;
 static constexpr uint8_t SEG_S = 0x6D;
 static constexpr uint8_t SEG_V = 0x3E;
+static constexpr uint8_t SEG_X = 0x76;
 
 enum EnvStage : uint8_t { ENV_IDLE = 0, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
 
@@ -95,12 +98,14 @@ struct Adsr {
 /*
  * Rates per sample at ~31.8 kHz. Time ≈ ENV_ONE / rate / SAMPLE_RATE seconds.
  *
- * ORG – instant on, full sustain, ~0.3 s release  (continuous organ)
- * PLK – instant on, ~15 ms decay to silence       (short pluck; no sustain)
- * PAD – ~1.0 s attack, full sustain, ~2 s release (slow swell)
+ * ORG – instant on, full sustain, ~0.3 s release
+ * PLK – instant on, ~15 ms decay to silence
+ * PAD – ~1.0 s attack, full sustain, ~2 s release
  * BRS – ~0.2 s attack, decay to 50%, medium release
- * PNO – fast attack, slow decay to silence while held, faster cut on release
- * DRM – instant on, ~40 ms decay, no sustain      (audible drum hits)
+ * PNO – fast attack, slow decay while held, faster cut on release
+ * SAX – medium attack, full sustain, medium release (+ 2nd harmonic)
+ * VLN – slow bow attack, full sustain, longer release (+ 2nd harmonic)
+ * DRM – instant on, ~40 ms decay (percussive)
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
     // attack  decay  sustain           release
@@ -109,6 +114,8 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     {    2,     16,   ENV_ONE,          1,   { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     {   12,     40,   ENV_ONE / 2,      20,  { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
     { 8000,      3,   0,                 40, { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    {   80,     30,   ENV_ONE,          15,  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
+    {   10,     20,   ENV_ONE,           8,  { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
     { 8192,     50,   0,                200, { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
@@ -132,19 +139,23 @@ struct Voice {
 static Voice voices[NUM_VOICES];
 static volatile uint32_t voice_age_counter = 0;
 static volatile uint32_t noise_lfsr = 0xACE1u;  // 16-bit LFSR seed
+static volatile int32_t  noise_lpf  = 0;         // one-pole low-pass state
 
 static volatile uint8_t i2s_slot = 0;
 static volatile int32_t i2s_hold = 0;
 
-/* Simple 16-bit LFSR white noise */
+/* 16-bit LFSR white noise, amplitude ~±SINE_PEAK/4, then mild LPF */
 static inline int32_t next_noise(void)
 {
     uint32_t l = noise_lfsr;
     uint32_t bit = ((l >> 0) ^ (l >> 2) ^ (l >> 3) ^ (l >> 5)) & 1u;
     l = (l >> 1) | (bit << 15);
     noise_lfsr = l;
-    /* Map 0..65535 → approx ±SINE_PEAK/2 */
-    return (int32_t)(((int32_t)l - 32768) * (SINE_PEAK / 32768));
+    /* ~±SINE_PEAK/4 */
+    int32_t n = (int32_t)(((int32_t)l - 32768) * (SINE_PEAK / 131072));
+    /* simple one-pole: y += (x - y) / 4  — softens harsh digital noise */
+    noise_lpf += (n - noise_lpf) >> 2;
+    return noise_lpf;
 }
 
 static void sine_table_init(void)
@@ -302,12 +313,24 @@ extern "C" void I2S_Handler(void)
 
             int32_t raw;
             if (v->is_noise) {
-                /* Noise attenuated hard — full-scale noise clips easily */
-                int32_t n = next_noise() >> 3;   // 1/8 amplitude
-                int32_t s = sine_lookup(v->phase) >> 3;
+                /* Filtered noise + quiet high sine — keep well below clip */
+                int32_t n = next_noise() >> 2;          // extra attenuate
+                int32_t s = sine_lookup(v->phase) >> 4;
                 raw = n + s;
             } else {
                 raw = sine_lookup(v->phase);
+                /* Sax / violin: add quieter 2nd harmonic for richer tone */
+                if (preset_idx == PRESET_SAX || preset_idx == PRESET_VLN) {
+                    int32_t h2 = sine_lookup(v->phase * 2) >> 2;  // -12 dB
+                    if (preset_idx == PRESET_SAX) {
+                        int32_t h3 = sine_lookup(v->phase * 3) >> 3; // -18 dB
+                        raw = raw + h2 + h3;
+                    } else {
+                        raw = raw + h2;
+                    }
+                    /* prevent overflow before env scale */
+                    raw = raw >> 1;
+                }
             }
             /* env * gain (256 = unity) */
             int64_t scaled = ((int64_t)raw * el) >> 16;
@@ -323,8 +346,9 @@ extern "C" void I2S_Handler(void)
             mix /= NUM_VOICES;
         mix = (mix * volume) / VOLUME_MAX;
 
-        if (mix >  2147483647LL) mix =  2147483647LL;
-        if (mix < -2147483648LL) mix = -2147483648LL;
+        /* soft-ish clamp */
+        if (mix >  2000000000LL) mix =  2000000000LL;
+        if (mix < -2000000000LL) mix = -2000000000LL;
 
         i2s_hold = (int32_t)mix;
         I2S->DATA[1].reg = (uint32_t)(int32_t)mix;
