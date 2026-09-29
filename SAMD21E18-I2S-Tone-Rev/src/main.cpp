@@ -385,15 +385,11 @@ static int32_t synth_next_sample()
             int32_t n = next_noise() >> 4;
             raw = (sine >> 1) + n;
         } else {
+            // Diagnostic isolation: keep SAX/VLN on the same clean sine
+            // oscillator as the other melodic presets. The previous
+            // harmonic path is the only synthesis difference in these two
+            // presets and is therefore being isolated here.
             raw = sine_lookup(v->phase);
-            if (preset_idx == PRESET_SAX) {
-                int32_t h2 = sine_lookup(v->phase << 1) >> 3;
-                int32_t h3 = sine_lookup(v->phase * 3) >> 4;
-                raw = (raw >> 1) + h2 + h3;
-            } else if (preset_idx == PRESET_VLN) {
-                int32_t h2 = sine_lookup(v->phase << 1) >> 3;
-                raw = (raw >> 1) + h2;
-            }
         }
 
         /* Preserve the known-good Rev2 fixed-point scaling exactly. The
