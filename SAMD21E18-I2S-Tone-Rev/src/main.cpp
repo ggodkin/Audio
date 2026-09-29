@@ -180,7 +180,9 @@ static volatile int32_t  noise_lpf  = 0;         // one-pole low-pass state
 
 // Audio producer/consumer buffer. The main loop renders audio; the I2S ISR
 // only moves already-rendered samples into the I2S DATA register.
-// Ring-buffer indexing uses a bit mask, so the frame count MUST be a power of two.\n// 1024 fits the SAMD21E18A SRAM and avoids the invalid wrap behavior of 1408.\nstatic constexpr uint16_t AUDIO_BUFFER_FRAMES = 1024;
+// Ring-buffer indexing uses a bit mask, so the frame count MUST be a power of two.\n// 1024 fits the SAMD21E18A SRAM and avoids the invalid wrap behavior of 1408.\n// Ring-buffer indexing uses a bit mask, so the frame count MUST be a power of two.
+// 1024 fits the SAMD21E18A SRAM and avoids the invalid wrap behavior of 1408.
+static constexpr uint16_t AUDIO_BUFFER_FRAMES = 1024;
 static constexpr uint16_t AUDIO_BUFFER_MASK   = AUDIO_BUFFER_FRAMES - 1;
 static int32_t audio_buffer[AUDIO_BUFFER_FRAMES];
 static volatile uint16_t audio_read_index  = 0;
