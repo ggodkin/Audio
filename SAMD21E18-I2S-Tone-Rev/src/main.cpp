@@ -180,7 +180,7 @@ static volatile int32_t  noise_lpf  = 0;         // one-pole low-pass state
 
 // Audio producer/consumer buffer. The main loop renders audio; the I2S ISR
 // only moves already-rendered samples into the I2S DATA register.
-static constexpr uint16_t AUDIO_BUFFER_FRAMES = 2048;
+static constexpr uint16_t AUDIO_BUFFER_FRAMES = 1536;
 static constexpr uint16_t AUDIO_BUFFER_MASK   = AUDIO_BUFFER_FRAMES - 1;
 static int32_t audio_buffer[AUDIO_BUFFER_FRAMES];
 static volatile uint16_t audio_read_index  = 0;
@@ -221,8 +221,6 @@ static int32_t vln_table[SINE_LEN];
 static int32_t organ_harmonic_table[SINE_LEN];
 static int32_t organ_sub_table[SINE_LEN];      // 16' (0.5x), weighted
 static int32_t organ_5th3_table[SINE_LEN];     // 5 1/3' (1.5x), weighted
-static int32_t organ_perc_table[SINE_LEN];     // 4' percussion
-static int32_t organ_leak_table[SINE_LEN];     // low-level fixed tonewheel leakage
 
 // Hammond-style modulation. A small ~6 Hz pitch wobble is much more
 // characteristic of a tonewheel organ than a perfectly static oscillator.
