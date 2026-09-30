@@ -697,10 +697,15 @@ static int32_t synth_next_sample()
             if (v->note == 2) {
                 v->perc_phase += HH_METAL_INC1;
                 v->drum_phase2 += HH_METAL_INC2;
-                if (v->hat_noise_level > HH_NOISE_DECAY)
+                if (v->hat_noise_level > HH_NOISE_DECAY) {
                     v->hat_noise_level -= HH_NOISE_DECAY;
-                else
+                } else {
                     v->hat_noise_level = 0;
+                    if (v->env_stage == ENV_IDLE && v->env_level == 0) {
+                        v->note = -1;
+                        v->phase_inc = 0;
+                    }
+                }
             } else if (v->note == 7) {
                 v->perc_phase += CRASH_METAL_INC;
                 v->drum_phase2 += (uint32_t)(((uint64_t)8800 << 32) / SAMPLE_RATE_HZ);
