@@ -564,8 +564,10 @@ static int32_t synth_next_sample()
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
             // Keep the proven fundamental at full level and add only one
             // quiet independent metallic partial.
-            int32_t metal = sine_lookup_fast(v->phase);
-            metal += sine_lookup_fast(v->perc_phase) >> 4;
+            // Test the two oscillators at clearly separated levels:
+            // fundamental = 25%, metallic partial = 100%.
+            int32_t metal = sine_lookup_fast(v->phase) >> 2;
+            metal += sine_lookup_fast(v->perc_phase);
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
