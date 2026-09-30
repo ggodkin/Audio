@@ -90,8 +90,11 @@ static constexpr uint32_t HH_METAL_INC3 =
 static constexpr uint32_t HH_METAL_INC4 =
     (uint32_t)(((uint64_t)HH_METAL_HZ4 << 32) / SAMPLE_RATE_HZ);
 static constexpr int32_t HH_DECAY =
-    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)55 * SAMPLE_RATE_HZ)) == 0
-        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)55 * SAMPLE_RATE_HZ)));
+    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)115 * SAMPLE_RATE_HZ)) == 0
+        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)115 * SAMPLE_RATE_HZ)));
+static constexpr int32_t HH_NOISE_DECAY =
+    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)220 * SAMPLE_RATE_HZ)) == 0
+        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)220 * SAMPLE_RATE_HZ)));
 static constexpr uint32_t HH_NOISE_HZ = 9000;
 static constexpr uint32_t HH_NOISE_INC =
     (uint32_t)(((uint64_t)HH_NOISE_HZ << 32) / SAMPLE_RATE_HZ);
@@ -224,6 +227,7 @@ struct Voice {
     volatile uint32_t perc_phase;      // secondary percussion/metal oscillator phase
     volatile uint32_t drum_phase2;     // independent drum partial phase
     volatile uint16_t perc_level;      // percussion decay
+    volatile uint16_t hat_noise_level; // hi-hat noise tail
 };
 
 static Voice voices[NUM_VOICES];
@@ -389,6 +393,7 @@ static void voices_init(void)
         voices[i].perc_phase  = 0;
         voices[i].drum_phase2 = 0;
         voices[i].perc_level  = 0;
+        voices[i].hat_noise_level = 0;
     }
 }
 
@@ -464,6 +469,7 @@ static void note_on(int note)
             voices[v].perc_phase  = HH_METAL_INC1;
             voices[v].drum_phase2 = HH_METAL_INC2;
             voices[v].perc_level  = ENV_ONE;
+            voices[v].hat_noise_level = ENV_ONE;
             voices[v].gain        = 256;
         } else {
             voices[v].is_noise  = (note == 7) ? 1 : 0;
@@ -583,8 +589,11 @@ static int32_t synth_next_sample()
             // A small band-limited-looking noise component adds the soft
             // stick/air component of a real hi-hat without making the sound
             // collapse into broadband hiss.
-            const int32_t hat_noise = next_noise() >> 1;
-            metal += hat_noise;
+            const int32_t hat_noise = next_noise();
+            // The noise tail has its own longer envelope. It starts modestly
+            // but remains audible after the metallic ring has decayed.
+            const int32_t noise_gain = v->hat_noise_level >> 2;
+            metal += (int32_t)(((int64_t)hat_noise * noise_gain) >> 16);
             metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
@@ -675,6 +684,10 @@ static int32_t synth_next_sample()
             if (v->note == 2) {
                 v->perc_phase += HH_METAL_INC1;
                 v->drum_phase2 += HH_METAL_INC2;
+                if (v->hat_noise_level > HH_NOISE_DECAY)
+                    v->hat_noise_level -= HH_NOISE_DECAY;
+                else
+                    v->hat_noise_level = 0;
             } else if (v->note == 7) {
                 v->perc_phase += CRASH_METAL_INC;
                 v->drum_phase2 += (uint32_t)(((uint64_t)8800 << 32) / SAMPLE_RATE_HZ);
