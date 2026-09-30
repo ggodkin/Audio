@@ -95,9 +95,6 @@ static constexpr int32_t HH_DECAY =
 static constexpr int32_t HH_NOISE_DECAY =
     (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)220 * SAMPLE_RATE_HZ)) == 0
         ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)220 * SAMPLE_RATE_HZ)));
-static constexpr uint32_t HH_NOISE_HZ = 9000;
-static constexpr uint32_t HH_NOISE_INC =
-    (uint32_t)(((uint64_t)HH_NOISE_HZ << 32) / SAMPLE_RATE_HZ);
 static constexpr uint32_t CRASH_METAL_INC =
     (uint32_t)(((uint64_t)CRASH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
 
@@ -548,7 +545,10 @@ static int32_t synth_next_sample()
                 else {
                     v->env_stage = ENV_IDLE;
                     v->phase_inc = 0;
-                    v->note = -1;
+                    // Keep S3 alive while its independent noise tail decays.
+                    if (!(preset_idx == PRESET_DRUM && v->note == 2 &&
+                          v->hat_noise_level > 0))
+                        v->note = -1;
                     el = 0;
                 }
             }
@@ -572,10 +572,13 @@ static int32_t synth_next_sample()
         }
 
         v->env_level = el;
-        if (el == 0)
+        const bool hat_tail = (preset_idx == PRESET_DRUM && v->note == 2 &&
+                               v->hat_noise_level > 0);
+        if (el == 0 && !hat_tail)
             continue;
 
         int32_t raw;
+        int32_t extra_noise = 0;
         if (preset_idx == PRESET_DRUM && v->note == 0) {
             // Clean kick body. The phase increment is swept downward after
             // mixing; this branch contains no noise or phase warping.
@@ -589,19 +592,13 @@ static int32_t synth_next_sample()
             // A small band-limited-looking noise component adds the soft
             // stick/air component of a real hi-hat without making the sound
             // collapse into broadband hiss.
-            const int32_t hat_noise = next_noise();
-            // The noise tail has its own longer envelope. It starts modestly
-            // but remains audible after the metallic ring has decayed.
-            const int32_t noise_gain = v->hat_noise_level >> 2;
-            metal += (int32_t)(((int64_t)hat_noise * noise_gain) >> 16);
+            // Actual noise is mixed separately so its longer tail is not
+            // forced to follow the metallic envelope.
+            extra_noise = next_noise();
             metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC4) >> 3;
-            // Add a high-frequency noise carrier shaped by the same short
-            // envelope. This supplies the characteristic noisy edge without
-            // using the low-frequency hiss that caused the earlier failure.
-            metal += sine_lookup_fast(v->drum_phase2 + HH_NOISE_INC) >> 2;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -675,7 +672,23 @@ static int32_t synth_next_sample()
         // On Cortex-M0+ this is substantially cheaper than a 64-bit multiply
         // for every voice/sample, while retaining adequate 16-bit envelope
         // resolution for the audio path.
-        int32_t scaled = (raw >> 8) * (el >> 8);
+        int32_t scaled = 0;
+        if (preset_idx == PRESET_DRUM && v->note == 2) {
+            // Metallic body follows the 115 ms envelope. Noise starts low,
+            // becomes relatively more prominent as the ring disappears, and
+            // continues on its own 220 ms tail.
+            if (el > 0)
+                scaled = (raw >> 8) * (el >> 8);
+            if (v->hat_noise_level > 0) {
+                const int32_t level_q8 = v->hat_noise_level >> 8;
+                const int32_t rise_q8 = 32 + ((ENV_ONE - v->hat_noise_level) >> 9);
+                int32_t noise_scaled = ((extra_noise >> 6) * level_q8) >> 8;
+                noise_scaled = (noise_scaled * rise_q8) >> 8;
+                scaled += noise_scaled;
+            }
+        } else {
+            scaled = (raw >> 8) * (el >> 8);
+        }
         if (v->gain != 256)
             scaled = (scaled * v->gain) >> 8;
         mix += scaled;
