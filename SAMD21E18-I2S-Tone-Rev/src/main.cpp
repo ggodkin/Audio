@@ -90,8 +90,11 @@ static constexpr uint32_t HH_METAL_INC3 =
 static constexpr uint32_t HH_METAL_INC4 =
     (uint32_t)(((uint64_t)HH_METAL_HZ4 << 32) / SAMPLE_RATE_HZ);
 static constexpr int32_t HH_DECAY =
-    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)85 * SAMPLE_RATE_HZ)) == 0
-        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)85 * SAMPLE_RATE_HZ)));
+    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)55 * SAMPLE_RATE_HZ)) == 0
+        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)55 * SAMPLE_RATE_HZ)));
+static constexpr uint32_t HH_NOISE_HZ = 9000;
+static constexpr uint32_t HH_NOISE_INC =
+    (uint32_t)(((uint64_t)HH_NOISE_HZ << 32) / SAMPLE_RATE_HZ);
 static constexpr uint32_t CRASH_METAL_INC =
     (uint32_t)(((uint64_t)CRASH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
 
@@ -580,12 +583,16 @@ static int32_t synth_next_sample()
             // A small band-limited-looking noise component adds the soft
             // stick/air component of a real hi-hat without making the sound
             // collapse into broadband hiss.
-            const int32_t hat_noise = next_noise() >> 2;
+            const int32_t hat_noise = next_noise() >> 1;
             metal += hat_noise;
             metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC4) >> 3;
+            // Add a high-frequency noise carrier shaped by the same short
+            // envelope. This supplies the characteristic noisy edge without
+            // using the low-frequency hiss that caused the earlier failure.
+            metal += sine_lookup_fast(v->drum_phase2 + HH_NOISE_INC) >> 2;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
