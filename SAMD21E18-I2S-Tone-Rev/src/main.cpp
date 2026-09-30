@@ -601,10 +601,11 @@ static int32_t synth_next_sample()
             // Actual noise is mixed separately so its longer tail is not
             // forced to follow the metallic envelope.
             extra_noise = next_noise();
-            metal += sine_lookup_fast(v->perc_phase) >> 1;
-            metal += sine_lookup_fast(v->drum_phase2) >> 1;
-            metal += sine_lookup_fast(v->hat_phase3) >> 2;
-            metal += sine_lookup_fast(v->hat_phase4) >> 2;
+            // Keep the tonal components subordinate to the noisy cymbal body.
+            metal += sine_lookup_fast(v->perc_phase) >> 2;
+            metal += sine_lookup_fast(v->drum_phase2) >> 2;
+            metal += sine_lookup_fast(v->hat_phase3) >> 3;
+            metal += sine_lookup_fast(v->hat_phase4) >> 3;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -687,8 +688,8 @@ static int32_t synth_next_sample()
                 scaled = (raw >> 8) * (el >> 8);
             if (v->hat_noise_level > 0) {
                 const int32_t level_q8 = v->hat_noise_level >> 8;
-                const int32_t rise_q8 = 32 + ((ENV_ONE - v->hat_noise_level) >> 9);
-                int32_t noise_scaled = ((extra_noise >> 6) * level_q8) >> 8;
+                const int32_t rise_q8 = 96 + ((ENV_ONE - v->hat_noise_level) >> 8);
+                int32_t noise_scaled = ((extra_noise >> 3) * level_q8) >> 8;
                 noise_scaled = (noise_scaled * rise_q8) >> 8;
                 scaled += noise_scaled;
             }
