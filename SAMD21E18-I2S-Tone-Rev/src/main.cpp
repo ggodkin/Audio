@@ -68,7 +68,7 @@ static const uint16_t button_hz[8] = {
  * How each drum is synthesized:
  *   S1 Kick  – 190→55 Hz sine pitch sweep, gain 1.0x, no noise
  *   S2 Snare – sine 200 Hz, gain 1.0x, pure tone
- *   S3 HH    – inharmonic 7 kHz metallic partials, noise-free
+ *   S3 HH    – temporary 440 Hz diagnostic sine, noise-free
  *   S4 Clap  – sine 280 Hz, gain 1.0x
  *   S5 TomL  – sine 160 Hz, gain 1.0x
  *   S6 TomM  – sine 220 Hz, gain 1.0x
@@ -104,7 +104,7 @@ static constexpr uint32_t KICK_INC_STEP =
 static const uint16_t drum_hz[8] = {
     150,  // Kick
     200,  // Snare
-    3500, // Hi-hat base
+    440,  // Hi-hat diagnostic sine
     280,  // Clap
     160,  // Tom low
     220,  // Tom mid
@@ -555,14 +555,10 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Hi-hat: deterministic, noise-free metallic partials.
-            // Each partial has its own phase accumulator; do not derive
-            // harmonics by multiplying the phase, which creates alias-heavy
-            // waveforms that can be perceived as broadband hiss.
-            int32_t metal = sine_lookup_fast(v->phase);
-            metal += sine_lookup_fast(v->perc_phase) >> 1;
-            metal += sine_lookup_fast(v->drum_phase2) >> 2;
-            raw = metal >> 1;
+            // S3 diagnostic: a single 440 Hz sine, exactly like the known-good
+            // S1 oscillator path. No noise, no partials, no phase modulation.
+            // Once this is confirmed clean, metallic partials can be restored.
+            raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
             // partials for a longer, brighter metallic ring.
