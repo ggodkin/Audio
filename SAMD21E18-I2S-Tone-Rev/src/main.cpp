@@ -76,9 +76,9 @@ static const uint16_t button_hz[8] = {
  *   S8 Crash – inharmonic 4.5 kHz metallic partials, noise-free
  * Drum envelopes are preset-specific; DRM is approximately 150 ms decay with no sustain.
  */
-static constexpr uint32_t HH_METAL_HZ1 = 4800;
-static constexpr uint32_t HH_METAL_HZ2 = 6700;
-static constexpr uint32_t HH_METAL_HZ3 = 9100;
+static constexpr uint32_t HH_METAL_HZ1 = 2800;
+static constexpr uint32_t HH_METAL_HZ2 = 4100;
+static constexpr uint32_t HH_METAL_HZ3 = 5300;
 static constexpr uint32_t CRASH_METAL_HZ = 6200;
 static constexpr uint32_t HH_METAL_INC1 =
     (uint32_t)(((uint64_t)HH_METAL_HZ1 << 32) / SAMPLE_RATE_HZ);
@@ -104,7 +104,7 @@ static constexpr uint32_t KICK_INC_STEP =
 static const uint16_t drum_hz[8] = {
     150,  // Kick
     200,  // Snare
-    7000, // Hi-hat carrier
+    3500, // Hi-hat base
     280,  // Clap
     160,  // Tom low
     220,  // Tom mid
