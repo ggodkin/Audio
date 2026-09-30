@@ -68,14 +68,21 @@ static const uint16_t button_hz[8] = {
  * How each drum is synthesized:
  *   S1 Kick  – 190→55 Hz sine pitch sweep, gain 2.0x, no noise
  *   S2 Snare – sine 200 Hz, gain 1.0x, pure tone
- *   S3 HH    – inharmonic 7 kHz partials + high-passed noise
+ *   S3 HH    – inharmonic 7 kHz metallic partials, noise-free
  *   S4 Clap  – sine 280 Hz, gain 1.0x
  *   S5 TomL  – sine 160 Hz, gain 1.0x
  *   S6 TomM  – sine 220 Hz, gain 1.0x
  *   S7 Rim   – sine 500 Hz, gain 1.0x
- *   S8 Crash – inharmonic 4.5 kHz partials + high-passed noise
+ *   S8 Crash – inharmonic 4.5 kHz metallic partials, noise-free
  * Drum envelopes are preset-specific; DRM is approximately 150 ms decay with no sustain.
  */
+static constexpr uint32_t HH_METAL_HZ = 11300;
+static constexpr uint32_t CRASH_METAL_HZ = 6200;
+static constexpr uint32_t HH_METAL_INC =
+    (uint32_t)(((uint64_t)HH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t CRASH_METAL_INC =
+    (uint32_t)(((uint64_t)CRASH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
+
 static constexpr uint32_t KICK_START_HZ = 190;
 static constexpr uint32_t KICK_END_HZ   = 55;
 static constexpr uint32_t KICK_SWEEP_MS = 80;
@@ -180,7 +187,7 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     { env_rate_from_ms(5),    env_rate_from_ms(2000), 0,                  env_rate_from_ms(1000), { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
     { env_rate_from_ms(70),   env_rate_from_ms(300), ENV_ONE * 3 / 4,     env_rate_from_ms(700),  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
     { env_rate_from_ms(120),  env_rate_from_ms(500), ENV_ONE * 3 / 4,     env_rate_from_ms(2000), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
-    { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(50),   { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
+    { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(300),  { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
@@ -433,6 +440,7 @@ static void note_on(int note)
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
         voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
+        voices[v].perc_phase = 0;
         voices[v].gain      = drum_gain[note];
     } else {
         voices[v].is_noise  = 0;
@@ -530,20 +538,24 @@ static int32_t synth_next_sample()
         if (preset_idx == PRESET_DRUM && v->note == 0) {
             // Clean kick body. The phase increment is swept downward after
             // mixing; this branch contains no noise or phase warping.
-            raw = sine_lookup(v->phase);
+            raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Hi-hat: inharmonic partials plus a small high-passed noise tail.
+            // Hi-hat: deliberately noise-free for a clean metallic test.
+            // Inharmonic partials make it ring instead of sounding like hiss.
             int32_t metal = sine_lookup_fast(v->phase);
             metal += sine_lookup_fast(v->phase * 3u) >> 1;
             metal += sine_lookup_fast(v->phase * 5u) >> 2;
-            raw = (metal >> 1) + (next_noise() >> 4);
+            metal += sine_lookup_fast(v->perc_phase) >> 2;
+            raw = metal >> 1;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
-            // Crash: broader inharmonic spectrum plus high-passed noise.
+            // Crash: several inharmonic components with stronger upper
+            // partials for a longer, brighter metallic ring.
             int32_t metal = sine_lookup_fast(v->phase);
             metal += sine_lookup_fast(v->phase * 2u) >> 1;
-            metal += sine_lookup_fast(v->phase * 3u) >> 2;
-            metal += sine_lookup_fast(v->phase * 4u) >> 3;
-            raw = (metal >> 1) + (next_noise() >> 3);
+            metal += sine_lookup_fast(v->phase * 3u) >> 1;
+            metal += sine_lookup_fast(v->phase * 4u) >> 2;
+            metal += sine_lookup_fast(v->perc_phase) >> 1;
+            raw = metal >> 1;
         } else if (v->is_noise) {
             raw = next_noise() >> 2;
         } else {
@@ -612,6 +624,12 @@ static int32_t synth_next_sample()
             scaled = (scaled * v->gain) >> 8;
         mix += scaled;
         v->phase += v->phase_inc;
+        if (preset_idx == PRESET_DRUM) {
+            if (v->note == 2)
+                v->perc_phase += HH_METAL_INC;
+            else if (v->note == 7)
+                v->perc_phase += CRASH_METAL_INC;
+        }
         if (preset_idx == PRESET_DRUM && v->note == 0 &&
             v->phase_inc > KICK_END_INC) {
             uint32_t next_inc = v->phase_inc - KICK_INC_STEP;
