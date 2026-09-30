@@ -61,6 +61,12 @@ Drum voices with zero sustain become idle automatically when their decay reaches
 RCP uses a more conservative sample rate and Rev's buffered audio transport while enabling
 the full organ, saxophone, violin, and drum synthesis paths by default.
 
+## Source layout
+
+- `main.cpp` coordinates startup and the main loop.
+- `audio_engine.cpp` and `audio_engine.h` own voices, envelopes, synthesis, buffering, and I2S.
+- `controls.cpp` and `controls.h` own the encoder, TM1638, key scanning, display, and status LED.
+
 ### Audio engine
 
 - Producer/consumer audio ring buffer.
