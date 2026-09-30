@@ -590,22 +590,16 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Hi-hat: keep only a small low-frequency body and build the
-            // metallic character from three independently phased partials.
-            // The partials are intentionally modest to avoid alias-heavy
-            // waveforms while making the upper-frequency ring audible.
-            int32_t metal = sine_lookup_fast(v->phase) >> 4;
-            // A small band-limited-looking noise component adds the soft
-            // stick/air component of a real hi-hat without making the sound
-            // collapse into broadband hiss.
-            // Actual noise is mixed separately so its longer tail is not
-            // forced to follow the metallic envelope.
+            // Hi-hat metallic body: XOR several inharmonic square-wave
+            // components. This produces a dense, non-pitched spectrum rather
+            // than a few dominant sine peaks.
+            const uint32_t bits =
+                ((v->perc_phase >> 31) ^ (v->drum_phase2 >> 31) ^
+                 (v->hat_phase3 >> 31) ^ (v->hat_phase4 >> 31));
+            int32_t metal = bits ? (SINE_PEAK >> 2) : -(SINE_PEAK >> 2);
+
+            // Real noise supplies the air and disappearing tail.
             extra_noise = next_noise();
-            // Keep the tonal components subordinate to the noisy cymbal body.
-            metal += sine_lookup_fast(v->perc_phase) >> 2;
-            metal += sine_lookup_fast(v->drum_phase2) >> 2;
-            metal += sine_lookup_fast(v->hat_phase3) >> 3;
-            metal += sine_lookup_fast(v->hat_phase4) >> 3;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
