@@ -453,7 +453,7 @@ static void note_on(int note)
             voices[v].is_noise    = 0;
             voices[v].phase_inc   = DIAG_PHASE_INC;
             voices[v].perc_phase  = HH_METAL_INC1;
-            voices[v].drum_phase2 = 0;
+            voices[v].drum_phase2 = HH_METAL_INC2;
             voices[v].gain        = 256;
         } else {
             voices[v].is_noise  = (note == 7) ? 1 : 0;
@@ -562,12 +562,14 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Keep the proven fundamental at full level and add only one
-            // quiet independent metallic partial.
-            // Test the two oscillators at clearly separated levels:
-            // fundamental = 25%, metallic partial = 100%.
-            int32_t metal = sine_lookup_fast(v->phase) >> 2;
+            // Hi-hat: keep only a small low-frequency body and build the
+            // metallic character from three independently phased partials.
+            // The partials are intentionally modest to avoid alias-heavy
+            // waveforms while making the upper-frequency ring audible.
+            int32_t metal = sine_lookup_fast(v->phase) >> 3;
             metal += sine_lookup_fast(v->perc_phase);
+            metal += sine_lookup_fast(v->drum_phase2) >> 1;
+            metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -649,7 +651,7 @@ static int32_t synth_next_sample()
         if (preset_idx == PRESET_DRUM) {
             if (v->note == 2) {
                 v->perc_phase += HH_METAL_INC1;
-                v->drum_phase2 += HH_METAL_INC3;
+                v->drum_phase2 += HH_METAL_INC2;
             } else if (v->note == 7) {
                 v->perc_phase += CRASH_METAL_INC;
                 v->drum_phase2 += (uint32_t)(((uint64_t)8800 << 32) / SAMPLE_RATE_HZ);
