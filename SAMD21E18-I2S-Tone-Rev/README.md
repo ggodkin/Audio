@@ -115,3 +115,14 @@ pio run -t upload
 ```
 
 ST-LINK V2/OpenOCD configuration is inherited from the project PlatformIO configuration.
+
+
+### Drum synthesis test
+
+The current drum implementation keeps S1 and S3 deterministic and noise-free:
+
+- **S1 Kick:** 190 Hz down to 55 Hz pitch sweep, clean sine body, 1.0× gain.
+- **S3 Hi-hat:** three independently phased metallic partials at approximately 4.8, 6.7, and 9.1 kHz; no broadband noise.
+- **S8 Crash:** independently phased metallic partials with a longer decay.
+
+S1/S3 were intentionally changed to independent phase accumulators rather than phase-multiplied harmonics. This avoids the alias-heavy waveforms that could sound like broadband hiss at the 31.25 kHz sample rate.
