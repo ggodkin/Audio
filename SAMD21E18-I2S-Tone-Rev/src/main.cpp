@@ -577,6 +577,11 @@ static int32_t synth_next_sample()
             // The partials are intentionally modest to avoid alias-heavy
             // waveforms while making the upper-frequency ring audible.
             int32_t metal = sine_lookup_fast(v->phase) >> 4;
+            // A small band-limited-looking noise component adds the soft
+            // stick/air component of a real hi-hat without making the sound
+            // collapse into broadband hiss.
+            const int32_t hat_noise = next_noise() >> 2;
+            metal += hat_noise;
             metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
