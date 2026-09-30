@@ -22,14 +22,14 @@ The DRM preset uses eight drum voices:
 |---|---|---|
 | S1 | Kick | 190→55 Hz downward sine sweep; no noise |
 | S2 | Snare | Short sine body |
-| S3 | Hi-hat | Inharmonic partials plus a small high-passed noise component |
+| S3 | Hi-hat | Noise-free inharmonic metallic oscillators for clean tuning
 | S4 | Clap | Short sine body |
 | S5 | Low tom | Short sine body |
 | S6 | Mid tom | Short sine body |
 | S7 | Rim | Short sine body |
-| S8 | Crash | Multiple inharmonic partials plus a stronger high-passed noise component |
+| S8 | Crash | Noise-free inharmonic metallic oscillators with longer ringing decay
 
-S1 is intentionally noise-free. S3 and S8 are the only drum voices using the noise source, and their noise contribution is kept below the carrier to avoid excessive broadband hiss.
+S1 is intentionally noise-free. S3 and S8 currently use no noise source. They are intentionally oscillator-only so metallic timbre can be tuned without broadband hiss; S8 has a longer decay for ringing.
 
 ## Envelope system
 
