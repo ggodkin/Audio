@@ -66,7 +66,7 @@ static const uint16_t button_hz[8] = {
 /* Drum pitch map (Hz) – approximate classic kit tones */
 /*
  * How each drum is synthesized:
- *   S1 Kick  – 190→55 Hz sine pitch sweep, gain 2.0x, no noise
+ *   S1 Kick  – 190→55 Hz sine pitch sweep, gain 1.0x, no noise
  *   S2 Snare – sine 200 Hz, gain 1.0x, pure tone
  *   S3 HH    – inharmonic 7 kHz metallic partials, noise-free
  *   S4 Clap  – sine 280 Hz, gain 1.0x
@@ -76,10 +76,16 @@ static const uint16_t button_hz[8] = {
  *   S8 Crash – inharmonic 4.5 kHz metallic partials, noise-free
  * Drum envelopes are preset-specific; DRM is approximately 150 ms decay with no sustain.
  */
-static constexpr uint32_t HH_METAL_HZ = 11300;
+static constexpr uint32_t HH_METAL_HZ1 = 4800;
+static constexpr uint32_t HH_METAL_HZ2 = 6700;
+static constexpr uint32_t HH_METAL_HZ3 = 9100;
 static constexpr uint32_t CRASH_METAL_HZ = 6200;
-static constexpr uint32_t HH_METAL_INC =
-    (uint32_t)(((uint64_t)HH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t HH_METAL_INC1 =
+    (uint32_t)(((uint64_t)HH_METAL_HZ1 << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t HH_METAL_INC2 =
+    (uint32_t)(((uint64_t)HH_METAL_HZ2 << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t HH_METAL_INC3 =
+    (uint32_t)(((uint64_t)HH_METAL_HZ3 << 32) / SAMPLE_RATE_HZ);
 static constexpr uint32_t CRASH_METAL_INC =
     (uint32_t)(((uint64_t)CRASH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
 
@@ -108,7 +114,7 @@ static const uint16_t drum_hz[8] = {
 
 /* Relative gain 0–256 (256 = unity). */
 static const uint16_t drum_gain[8] = {
-    512,  // Kick
+    256,  // Kick
     256,  // Snare
     240,  // Hi-hat
     256,  // Clap
@@ -206,7 +212,8 @@ struct Voice {
     volatile uint8_t  is_noise;       // 1 = noise source (hi-hat / crash)
     volatile uint16_t gain;           // 256 = unity
     volatile uint16_t click_level;     // Hammond key-click transient, 0..65535
-    volatile uint32_t perc_phase;      // 4' percussion oscillator phase
+    volatile uint32_t perc_phase;      // secondary percussion/metal oscillator phase
+    volatile uint32_t drum_phase2;     // independent drum partial phase
     volatile uint16_t perc_level;      // percussion decay
 };
 
@@ -371,6 +378,7 @@ static void voices_init(void)
         voices[i].gain        = 256;
         voices[i].click_level = 0;
         voices[i].perc_phase  = 0;
+        voices[i].drum_phase2 = 0;
         voices[i].perc_level  = 0;
     }
 }
@@ -434,13 +442,20 @@ static void note_on(int note)
     voices[v].age         = ++voice_age_counter;
     voices[v].click_level = (preset_idx == 0) ? ENV_ONE : 0;
     voices[v].perc_phase  = 0;
+    voices[v].drum_phase2 = 0;
     voices[v].perc_level  = (preset_idx == 0) ? ENV_ONE : 0;
 
     if (preset_idx == PRESET_DRUM) {
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
         voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
-        voices[v].perc_phase = 0;
+        if (note == 2) {
+            voices[v].perc_phase = HH_METAL_INC1;
+            voices[v].drum_phase2 = HH_METAL_INC2;
+        } else if (note == 7) {
+            voices[v].perc_phase = CRASH_METAL_INC;
+            voices[v].drum_phase2 = CRASH_METAL_INC;
+        }
         voices[v].gain      = drum_gain[note];
     } else {
         voices[v].is_noise  = 0;
@@ -540,12 +555,13 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Hi-hat: deliberately noise-free for a clean metallic test.
-            // Inharmonic partials make it ring instead of sounding like hiss.
+            // Hi-hat: deterministic, noise-free metallic partials.
+            // Each partial has its own phase accumulator; do not derive
+            // harmonics by multiplying the phase, which creates alias-heavy
+            // waveforms that can be perceived as broadband hiss.
             int32_t metal = sine_lookup_fast(v->phase);
-            metal += sine_lookup_fast(v->phase * 3u) >> 1;
-            metal += sine_lookup_fast(v->phase * 5u) >> 2;
-            metal += sine_lookup_fast(v->perc_phase) >> 2;
+            metal += sine_lookup_fast(v->perc_phase) >> 1;
+            metal += sine_lookup_fast(v->drum_phase2) >> 2;
             raw = metal >> 1;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -625,10 +641,13 @@ static int32_t synth_next_sample()
         mix += scaled;
         v->phase += v->phase_inc;
         if (preset_idx == PRESET_DRUM) {
-            if (v->note == 2)
-                v->perc_phase += HH_METAL_INC;
-            else if (v->note == 7)
+            if (v->note == 2) {
+                v->perc_phase += HH_METAL_INC2;
+                v->drum_phase2 += HH_METAL_INC3;
+            } else if (v->note == 7) {
                 v->perc_phase += CRASH_METAL_INC;
+                v->drum_phase2 += (uint32_t)(((uint64_t)8800 << 32) / SAMPLE_RATE_HZ);
+            }
         }
         if (preset_idx == PRESET_DRUM && v->note == 0 &&
             v->phase_inc > KICK_END_INC) {
