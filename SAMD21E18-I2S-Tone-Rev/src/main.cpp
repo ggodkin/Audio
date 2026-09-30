@@ -79,6 +79,7 @@ static const uint16_t button_hz[8] = {
 static constexpr uint32_t HH_METAL_HZ1 = 2800;
 static constexpr uint32_t HH_METAL_HZ2 = 4100;
 static constexpr uint32_t HH_METAL_HZ3 = 5300;
+static constexpr uint32_t HH_METAL_HZ4 = 7600;
 static constexpr uint32_t CRASH_METAL_HZ = 6200;
 static constexpr uint32_t HH_METAL_INC1 =
     (uint32_t)(((uint64_t)HH_METAL_HZ1 << 32) / SAMPLE_RATE_HZ);
@@ -86,6 +87,11 @@ static constexpr uint32_t HH_METAL_INC2 =
     (uint32_t)(((uint64_t)HH_METAL_HZ2 << 32) / SAMPLE_RATE_HZ);
 static constexpr uint32_t HH_METAL_INC3 =
     (uint32_t)(((uint64_t)HH_METAL_HZ3 << 32) / SAMPLE_RATE_HZ);
+static constexpr uint32_t HH_METAL_INC4 =
+    (uint32_t)(((uint64_t)HH_METAL_HZ4 << 32) / SAMPLE_RATE_HZ);
+static constexpr int32_t HH_DECAY =
+    (int32_t)(((ENV_ONE * 1000ULL) / ((uint64_t)85 * SAMPLE_RATE_HZ)) == 0
+        ? 1 : ((ENV_ONE * 1000ULL) / ((uint64_t)85 * SAMPLE_RATE_HZ)));
 static constexpr uint32_t CRASH_METAL_INC =
     (uint32_t)(((uint64_t)CRASH_METAL_HZ << 32) / SAMPLE_RATE_HZ);
 
@@ -454,6 +460,7 @@ static void note_on(int note)
             voices[v].phase_inc   = DIAG_PHASE_INC;
             voices[v].perc_phase  = HH_METAL_INC1;
             voices[v].drum_phase2 = HH_METAL_INC2;
+            voices[v].perc_level  = ENV_ONE;
             voices[v].gain        = 256;
         } else {
             voices[v].is_noise  = (note == 7) ? 1 : 0;
@@ -521,7 +528,10 @@ static int32_t synth_next_sample()
             }
             break;
         case ENV_DECAY:
-            el -= adsr->decay;
+            // Hi-hat gets its own short decay so it behaves like a struck
+            // cymbal rather than a sustained pitched instrument.
+            el -= (preset_idx == PRESET_DRUM && v->note == 2)
+                    ? HH_DECAY : adsr->decay;
             if (el <= adsr->sustain) {
                 el = adsr->sustain;
                 if (adsr->sustain > 0)
@@ -566,10 +576,11 @@ static int32_t synth_next_sample()
             // metallic character from three independently phased partials.
             // The partials are intentionally modest to avoid alias-heavy
             // waveforms while making the upper-frequency ring audible.
-            int32_t metal = sine_lookup_fast(v->phase) >> 3;
-            metal += sine_lookup_fast(v->perc_phase);
+            int32_t metal = sine_lookup_fast(v->phase) >> 4;
+            metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
             metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
+            metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC4) >> 3;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
