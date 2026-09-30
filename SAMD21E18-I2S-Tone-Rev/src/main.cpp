@@ -447,16 +447,21 @@ static void note_on(int note)
 
     if (preset_idx == PRESET_DRUM) {
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
-        voices[v].is_noise  = (note == 2 || note == 7) ? 1 : 0;
-        voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
         if (note == 2) {
-            voices[v].perc_phase = HH_METAL_INC1;
-            voices[v].drum_phase2 = HH_METAL_INC2;
-        } else if (note == 7) {
-            voices[v].perc_phase = CRASH_METAL_INC;
-            voices[v].drum_phase2 = CRASH_METAL_INC;
+            // S3 isolation: force the exact known-good diagnostic oscillator.
+            // Do not inherit any noise or metallic-drum state.
+            voices[v].is_noise   = 0;
+            voices[v].phase_inc  = DIAG_PHASE_INC;
+            voices[v].gain       = 256;
+        } else {
+            voices[v].is_noise  = (note == 7) ? 1 : 0;
+            voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
+            if (note == 7) {
+                voices[v].perc_phase = CRASH_METAL_INC;
+                voices[v].drum_phase2 = CRASH_METAL_INC;
+            }
+            voices[v].gain = drum_gain[note];
         }
-        voices[v].gain      = drum_gain[note];
     } else {
         voices[v].is_noise  = 0;
         voices[v].phase_inc = hz_to_inc(button_hz[note]);
