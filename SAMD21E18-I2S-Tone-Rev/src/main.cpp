@@ -225,6 +225,8 @@ struct Voice {
     volatile uint32_t drum_phase2;     // independent drum partial phase
     volatile uint32_t hat_phase3;       // 5.3 kHz hi-hat partial
     volatile uint32_t hat_phase4;       // 7.6 kHz hi-hat partial
+    volatile int32_t hat_noise_hp;
+    volatile int32_t hat_noise_bp;
     volatile uint16_t perc_level;      // percussion decay
     volatile uint16_t hat_noise_level; // hi-hat noise tail
 };
@@ -395,6 +397,8 @@ static void voices_init(void)
         voices[i].hat_noise_level = 0;
         voices[i].hat_phase3 = 0;
         voices[i].hat_phase4 = 0;
+        voices[i].hat_noise_hp = 0;
+        voices[i].hat_noise_bp = 0;
     }
 }
 
@@ -471,6 +475,8 @@ static void note_on(int note)
             voices[v].drum_phase2 = HH_METAL_INC2;
             voices[v].hat_phase3 = 0;
             voices[v].hat_phase4 = 0;
+            voices[v].hat_noise_hp = 0;
+            voices[v].hat_noise_bp = 0;
             voices[v].perc_level  = ENV_ONE;
             voices[v].hat_noise_level = ENV_ONE;
             voices[v].gain        = 256;
@@ -590,16 +596,27 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // Hi-hat metallic body: XOR several inharmonic square-wave
-            // components. This produces a dense, non-pitched spectrum rather
-            // than a few dominant sine peaks.
-            const uint32_t bits =
+            // Closed hi-hat: a short metallic transient plus filtered noise.
+            // The noise is deliberately band-limited in the upper mids/highs;
+            // this is the main sound, while the inharmonic oscillators add the
+            // metallic "chick" rather than acting as pitched notes.
+            const int32_t n = next_noise();
+            v->hat_noise_hp += (n - v->hat_noise_hp) >> 2;
+            const int32_t hp = n - v->hat_noise_hp;
+            v->hat_noise_bp += (hp - v->hat_noise_bp) >> 2;
+            extra_noise = v->hat_noise_bp;
+
+            // Six inharmonic square components, mixed very quietly.
+            // Their job is to give the noise a metallic edge, not distinct
+            // spectral pitches.
+            const uint32_t m =
                 ((v->perc_phase >> 31) ^ (v->drum_phase2 >> 31) ^
                  (v->hat_phase3 >> 31) ^ (v->hat_phase4 >> 31));
-            int32_t metal = bits ? (SINE_PEAK >> 2) : -(SINE_PEAK >> 2);
-
-            // Real noise supplies the air and disappearing tail.
-            extra_noise = next_noise();
+            int32_t metal = m ? (SINE_PEAK >> 4) : -(SINE_PEAK >> 4);
+            metal += sine_lookup_fast(v->perc_phase) >> 3;
+            metal += sine_lookup_fast(v->drum_phase2) >> 3;
+            metal += sine_lookup_fast(v->hat_phase3) >> 4;
+            metal += sine_lookup_fast(v->hat_phase4) >> 4;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -682,8 +699,8 @@ static int32_t synth_next_sample()
                 scaled = (raw >> 8) * (el >> 8);
             if (v->hat_noise_level > 0) {
                 const int32_t level_q8 = v->hat_noise_level >> 8;
-                const int32_t rise_q8 = 96 + ((ENV_ONE - v->hat_noise_level) >> 8);
-                int32_t noise_scaled = ((extra_noise >> 3) * level_q8) >> 8;
+                const int32_t rise_q8 = 80 + ((ENV_ONE - v->hat_noise_level) >> 8);
+                int32_t noise_scaled = ((extra_noise >> 2) * level_q8) >> 8;
                 noise_scaled = (noise_scaled * rise_q8) >> 8;
                 scaled += noise_scaled;
             }
