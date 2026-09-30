@@ -24,6 +24,8 @@ static constexpr uint8_t SEG_R = 0x50;
 static constexpr uint8_t SEG_S = 0x6D;
 static constexpr uint8_t SEG_V = 0x3E;
 static constexpr uint8_t SEG_X = 0x76;
+static constexpr uint32_t HEARTBEAT_INTERVAL_MS = 500;
+static constexpr uint32_t UNDERRUN_BLINK_INTERVAL_MS = 125;
 static const uint8_t PRESET_LABELS[8][4] = {
     { SEG_O, SEG_R, SEG_G, SEG_BLANK },
     { SEG_P, SEG_L, SEG_K, SEG_BLANK },
@@ -36,6 +38,10 @@ static const uint8_t PRESET_LABELS[8][4] = {
 };
 enum UiMode : uint8_t { MODE_VOLUME = 0, MODE_PRESET = 1 };
 static volatile uint8_t ui_mode = MODE_VOLUME;
+static uint32_t led_last_toggle_ms = 0;
+static uint32_t last_underruns = 0;
+static bool led_state = false;
+static bool audio_underrun_seen = false;
 
 static void led_init(void)
 {
@@ -329,6 +335,9 @@ void controls_initialize()
 
 void controls_audio_started()
 {
+    led_state = true;
+    led_last_toggle_ms = millis();
+    last_underruns = audio_engine_underruns();
     led_on();
     delay(100);
 }
@@ -350,10 +359,22 @@ void controls_show_ui()
 
 void controls_update_audio_status()
 {
-    static uint32_t last_underruns = 0;
     const uint32_t underruns = audio_engine_underruns();
     if (underruns != last_underruns) {
-        led_off();
         last_underruns = underruns;
+        audio_underrun_seen = true;
+    }
+
+    const uint32_t now = millis();
+    const uint32_t interval = audio_underrun_seen
+        ? UNDERRUN_BLINK_INTERVAL_MS
+        : HEARTBEAT_INTERVAL_MS;
+    if ((uint32_t)(now - led_last_toggle_ms) >= interval) {
+        led_state = !led_state;
+        led_last_toggle_ms = now;
+        if (led_state)
+            led_on();
+        else
+            led_off();
     }
 }

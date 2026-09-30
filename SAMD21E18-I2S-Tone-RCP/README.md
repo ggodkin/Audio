@@ -77,7 +77,7 @@ the full organ, saxophone, violin, and drum synthesis paths by default.
 - Four independent voices have their own oscillator/envelope state.
 - Repeated scans of an already-held key do not retrigger its envelope.
 - Releasing a key changes only that voice's envelope.
-- PA17 turns off after the first audio-buffer underrun, making starvation visible during polyphony tests.
+- PA17 gives a 1 Hz heartbeat; after the first audio-buffer underrun it switches to a faster blink to signal starvation.
 
 ADSR rates are specified in milliseconds and converted using the configured
 sample rate. The organ uses drawbar-style harmonics, vibrato, tremolo, and a
@@ -98,7 +98,7 @@ A release affects only the voice mapped to that key. A simultaneous release/pres
 | PA08 | MAX98357A DIN |
 | PA10 | MAX98357A BCLK |
 | PA11 | MAX98357A LRC |
-| PA17 | Status LED (turns off on audio-buffer underrun) |
+| PA17 | Status LED (heartbeat; faster blink on audio-buffer underrun) |
 | PA14 | Encoder A |
 | PA15 | Encoder B |
 | PA22 | Encoder push |
@@ -118,7 +118,7 @@ Test the four-voice path in this order:
 5. Repeat with three and four keys.
 6. Repeat using each instrument preset.
 
-If the PA17 LED turns off or distortion appears, the audio producer may be falling behind. Check CPU load and I2S timing before changing ADSR behavior.
+If the PA17 LED switches to a faster blink or distortion appears, the audio producer may be falling behind. Check CPU load and I2S timing before changing ADSR behavior.
 
 If a released key produces another note, observe whether the TM1638 indication for that released key also remains active. That helps distinguish input ghosting from audio voice-management problems.
 
