@@ -223,6 +223,8 @@ struct Voice {
     volatile uint16_t click_level;     // Hammond key-click transient, 0..65535
     volatile uint32_t perc_phase;      // secondary percussion/metal oscillator phase
     volatile uint32_t drum_phase2;     // independent drum partial phase
+    volatile uint32_t hat_phase3;       // 5.3 kHz hi-hat partial
+    volatile uint32_t hat_phase4;       // 7.6 kHz hi-hat partial
     volatile uint16_t perc_level;      // percussion decay
     volatile uint16_t hat_noise_level; // hi-hat noise tail
 };
@@ -391,6 +393,8 @@ static void voices_init(void)
         voices[i].drum_phase2 = 0;
         voices[i].perc_level  = 0;
         voices[i].hat_noise_level = 0;
+        voices[i].hat_phase3 = 0;
+        voices[i].hat_phase4 = 0;
     }
 }
 
@@ -465,6 +469,8 @@ static void note_on(int note)
             voices[v].phase_inc   = DIAG_PHASE_INC;
             voices[v].perc_phase  = HH_METAL_INC1;
             voices[v].drum_phase2 = HH_METAL_INC2;
+            voices[v].hat_phase3 = 0;
+            voices[v].hat_phase4 = 0;
             voices[v].perc_level  = ENV_ONE;
             voices[v].hat_noise_level = ENV_ONE;
             voices[v].gain        = 256;
@@ -597,8 +603,8 @@ static int32_t synth_next_sample()
             extra_noise = next_noise();
             metal += sine_lookup_fast(v->perc_phase) >> 1;
             metal += sine_lookup_fast(v->drum_phase2) >> 1;
-            metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC3) >> 2;
-            metal += sine_lookup_fast(v->drum_phase2 + HH_METAL_INC4) >> 3;
+            metal += sine_lookup_fast(v->hat_phase3) >> 2;
+            metal += sine_lookup_fast(v->hat_phase4) >> 2;
             raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
@@ -697,6 +703,8 @@ static int32_t synth_next_sample()
             if (v->note == 2) {
                 v->perc_phase += HH_METAL_INC1;
                 v->drum_phase2 += HH_METAL_INC2;
+                v->hat_phase3 += HH_METAL_INC3;
+                v->hat_phase4 += HH_METAL_INC4;
                 if (v->hat_noise_level > HH_NOISE_DECAY) {
                     v->hat_noise_level -= HH_NOISE_DECAY;
                 } else {
