@@ -448,11 +448,13 @@ static void note_on(int note)
     if (preset_idx == PRESET_DRUM) {
         /* Hi-hat (2) and Crash (7) use noise; others use sine body */
         if (note == 2) {
-            // S3 isolation: force the exact known-good diagnostic oscillator.
-            // Do not inherit any noise or metallic-drum state.
-            voices[v].is_noise   = 0;
-            voices[v].phase_inc  = DIAG_PHASE_INC;
-            voices[v].gain       = 256;
+            // S3: proven 523 Hz fundamental plus one independently phased
+            // 2.8 kHz metallic partial. No noise or phase multiplication.
+            voices[v].is_noise    = 0;
+            voices[v].phase_inc   = DIAG_PHASE_INC;
+            voices[v].perc_phase  = HH_METAL_INC1;
+            voices[v].drum_phase2 = 0;
+            voices[v].gain        = 256;
         } else {
             voices[v].is_noise  = (note == 7) ? 1 : 0;
             voices[v].phase_inc = (note == 0) ? KICK_START_INC : hz_to_inc(drum_hz[note]);
@@ -560,8 +562,11 @@ static int32_t synth_next_sample()
             // mixing; this branch contains no noise or phase warping.
             raw = sine_lookup_fast(v->phase);
         } else if (preset_idx == PRESET_DRUM && v->note == 2) {
-            // S3 controlled metallic test: fundamental + one independent
-            // partial. No noise and no phase multiplication.
+            // Keep the proven fundamental at full level and add only one
+            // quiet independent metallic partial.
+            int32_t metal = sine_lookup_fast(v->phase);
+            metal += sine_lookup_fast(v->perc_phase) >> 4;
+            raw = metal;
         } else if (preset_idx == PRESET_DRUM && v->note == 7) {
             // Crash: several inharmonic components with stronger upper
             // partials for a longer, brighter metallic ring.
@@ -641,7 +646,7 @@ static int32_t synth_next_sample()
         v->phase += v->phase_inc;
         if (preset_idx == PRESET_DRUM) {
             if (v->note == 2) {
-                v->perc_phase += HH_METAL_INC2;
+                v->perc_phase += HH_METAL_INC1;
                 v->drum_phase2 += HH_METAL_INC3;
             } else if (v->note == 7) {
                 v->perc_phase += CRASH_METAL_INC;
