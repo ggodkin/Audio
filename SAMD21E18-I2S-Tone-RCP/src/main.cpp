@@ -53,6 +53,8 @@ static uint32_t diag_phase = 0;
 
 static constexpr int32_t SINE_PEAK = 280000000;
 static constexpr int32_t ENV_ONE   = 65536;
+static constexpr uint32_t ENV_RATE_SHIFT = 8;
+static constexpr uint32_t ENV_RATE_SCALE = 1u << ENV_RATE_SHIFT;
 
 static int32_t sine_table[SINE_LEN];
 
@@ -161,21 +163,20 @@ struct Adsr {
     uint8_t label[4];
 };
 
-// Envelope rates are specified in milliseconds and converted to fixed-point
-// increments for the current SAMPLE_RATE_HZ. This keeps the musical timing
-// stable if the audio sample rate changes.
+// Envelope rates are Q8 fixed-point increments per sample, derived from time
+// and the current sample rate.
 //
 // attack_ms / decay_ms / release_ms are approximate times to traverse the
 // corresponding envelope range. A zero value means an immediate transition.
-static constexpr int32_t env_rate_from_ms(uint32_t ms)
+static constexpr int32_t env_rate_from_ms(uint32_t ms, int32_t range = ENV_ONE)
 {
     return (ms == 0)
-        ? ENV_ONE
-        : (int32_t)((((ENV_ONE * 1000ULL) /
-                       ((uint64_t)ms * SAMPLE_RATE_HZ)) == 0)
-                    ? 1
-                    : ((ENV_ONE * 1000ULL) /
-                       ((uint64_t)ms * SAMPLE_RATE_HZ)));
+                ? ENV_ONE * ENV_RATE_SCALE
+                    : (int32_t)((((uint64_t)range * 1000ULL * ENV_RATE_SCALE) /
+                             ((uint64_t)ms * SAMPLE_RATE_HZ)) == 0
+                          ? 1
+                                                    : (((uint64_t)range * 1000ULL * ENV_RATE_SCALE) /
+                              ((uint64_t)ms * SAMPLE_RATE_HZ)));
 }
 
 /*
@@ -187,8 +188,8 @@ static constexpr int32_t env_rate_from_ms(uint32_t ms)
  * PAD – ~1 s attack, full sustain, ~2 s release
  * BRS – ~150 ms attack, ~500 ms decay toward 50%, ~1 s release
  * PNO – fast attack, ~2 s decay to silence, ~1 s release
- * SAX – ~70 ms attack, ~300 ms decay toward 75%, ~700 ms release
- * VLN – ~120 ms attack, ~500 ms decay toward 75%, ~2 s release
+ * SAX – ~40 ms attack, ~300 ms decay toward 90%, ~700 ms release
+ * VLN – ~100 ms attack, ~500 ms decay toward 80%, ~1.2 s release
  * DRM – instant attack, ~150 ms decay, no audible release
  */
 static const Adsr PRESETS[NUM_PRESETS] = {
@@ -196,9 +197,9 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     { env_rate_from_ms(1),    env_rate_from_ms(180),  0,                  env_rate_from_ms(250),  { SEG_P, SEG_L, SEG_K, SEG_BLANK } }, // PLK
     { env_rate_from_ms(1000), env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2000), { SEG_P, SEG_A, SEG_D, SEG_BLANK } }, // PAD
     { env_rate_from_ms(150),  env_rate_from_ms(500), ENV_ONE / 2,         env_rate_from_ms(1000), { SEG_B, SEG_R, SEG_S, SEG_BLANK } }, // BRS
-    { env_rate_from_ms(5),    env_rate_from_ms(2000), 0,                  env_rate_from_ms(1000), { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
-    { env_rate_from_ms(70),   env_rate_from_ms(300), ENV_ONE * 3 / 4,     env_rate_from_ms(700),  { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
-    { env_rate_from_ms(120),  env_rate_from_ms(500), ENV_ONE * 3 / 4,     env_rate_from_ms(2000), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
+    { env_rate_from_ms(5),    env_rate_from_ms(2000), 0,                  env_rate_from_ms(250),  { SEG_P, SEG_N, SEG_O, SEG_BLANK } }, // PNO
+    { env_rate_from_ms(40),   env_rate_from_ms(300, ENV_ONE / 10), ENV_ONE * 9 / 10, env_rate_from_ms(700, ENV_ONE * 9 / 10), { SEG_S, SEG_A, SEG_X, SEG_BLANK } }, // SAX
+    { env_rate_from_ms(100),  env_rate_from_ms(500, ENV_ONE / 5),  ENV_ONE * 4 / 5,  env_rate_from_ms(1200, ENV_ONE * 4 / 5), { SEG_V, SEG_L, SEG_N, SEG_BLANK } }, // VLN
     { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(300),  { SEG_D, SEG_R, SEG_M, SEG_BLANK } }, // DRM
 };
 
@@ -213,6 +214,7 @@ struct Voice {
     volatile uint32_t phase_inc;
     volatile int32_t  env_level;
     volatile uint8_t  env_stage;
+    volatile uint8_t  env_rate_fraction;
     volatile int8_t   note;
     volatile uint32_t age;
     volatile uint8_t  is_noise;       // 1 = noise source (hi-hat / crash)
@@ -226,6 +228,13 @@ struct Voice {
     volatile int32_t hat_noise_bp;
     volatile uint32_t hat_noise_level; // hi-hat noise tail, 0..ENV_ONE
 };
+
+static inline int32_t env_increment(volatile uint8_t &fraction, int32_t rate_q8)
+{
+    uint32_t accumulated = (uint32_t)fraction + (uint32_t)rate_q8;
+    fraction = (uint8_t)(accumulated & (ENV_RATE_SCALE - 1u));
+    return (int32_t)(accumulated >> ENV_RATE_SHIFT);
+}
 
 static Voice voices[NUM_VOICES];
 static volatile uint32_t voice_age_counter = 0;
@@ -373,6 +382,7 @@ static void voices_init(void)
         voices[i].phase_inc = 0;
         voices[i].env_level = 0;
         voices[i].env_stage = ENV_IDLE;
+        voices[i].env_rate_fraction = 0;
         voices[i].note      = -1;
         voices[i].age       = 0;
         voices[i].is_noise  = 0;
@@ -449,6 +459,7 @@ static void note_on(int note)
     voices[v].phase     = 0;
     voices[v].env_level = 0;
     voices[v].env_stage = ENV_ATTACK;
+    voices[v].env_rate_fraction = 0;
     voices[v].age        = ++voice_age_counter;
     voices[v].click_level = (preset_idx == 0) ? ENV_ONE : 0;
     voices[v].perc_phase  = 0;
@@ -488,8 +499,10 @@ static void note_off(int note)
 {
     int v = find_voice_for_note(note);
     if (v < 0) return;
-    if (voices[v].env_stage != ENV_IDLE)
+    if (voices[v].env_stage != ENV_IDLE) {
         voices[v].env_stage = ENV_RELEASE;
+        voices[v].env_rate_fraction = 0;
+    }
 }
 
 // Four independent voice slots are mixed sample-by-sample. Voice allocation
@@ -529,19 +542,22 @@ static int32_t synth_next_sample()
 
         switch (v->env_stage) {
         case ENV_ATTACK:
-            el += adsr->attack;
+            el += env_increment(v->env_rate_fraction, adsr->attack);
             if (el >= ENV_ONE) {
                 el = ENV_ONE;
                 v->env_stage = ENV_DECAY;
+                v->env_rate_fraction = 0;
             }
             break;
         case ENV_DECAY:
             // Hi-hat gets its own short decay so it behaves like a struck
             // cymbal rather than a sustained pitched instrument.
-            el -= (preset_idx == PRESET_DRUM && v->note == 2)
-                    ? HH_DECAY : adsr->decay;
+                el -= (preset_idx == PRESET_DRUM && v->note == 2)
+                    ? HH_DECAY
+                    : env_increment(v->env_rate_fraction, adsr->decay);
             if (el <= adsr->sustain) {
                 el = adsr->sustain;
+                v->env_rate_fraction = 0;
                 if (adsr->sustain > 0)
                     v->env_stage = ENV_SUSTAIN;
                 else {
@@ -557,12 +573,14 @@ static int32_t synth_next_sample()
             break;
         case ENV_SUSTAIN:
             el = adsr->sustain;
+            v->env_rate_fraction = 0;
             break;
         case ENV_RELEASE: {
-            el -= adsr->release;
+            el -= env_increment(v->env_rate_fraction, adsr->release);
             if (el <= 0) {
                 el = 0;
                 v->env_stage = ENV_IDLE;
+                v->env_rate_fraction = 0;
                 v->phase_inc = 0;
                 v->note = -1;
             }

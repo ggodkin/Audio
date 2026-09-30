@@ -37,7 +37,7 @@ The crash is oscillator-only; the kick is a clean sine pitch sweep.
 
 ## Envelope system
 
-ADSR timing is now defined in milliseconds rather than as raw per-sample increments. The firmware converts the requested times to fixed-point envelope rates using the current audio sample rate. This keeps the intended envelope timing stable if the I2S sample rate is changed.
+ADSR timing is defined in milliseconds rather than as raw per-sample increments. Decay and release rates account for their actual level ranges, so times remain accurate when a preset decays only partway to its sustain level.
 
 The current presets are:
 
@@ -47,12 +47,12 @@ The current presets are:
 | PLK | 1 ms | 180 ms | 0% | 250 ms |
 | PAD | 1 s | immediate | 100% | ~2 s |
 | BRS | 150 ms | 500 ms → 50% | 50% | 1 s |
-| PNO | 5 ms | ~2 s → 0% | 0% | 1 s |
-| SAX | 70 ms | 300 ms → 75% | 75% | 700 ms |
-| VLN | 120 ms | 500 ms → 75% | 75% | ~2 s |
+| PNO | 5 ms | ~2 s → 0% | 0% | 250 ms if released before decay completes |
+| SAX | 40 ms | 300 ms → 90% | 90% | 700 ms |
+| VLN | 100 ms | 500 ms → 80% | 80% | 1.2 s |
 | DRM | 1 ms | 150 ms → 0% | 0% | not normally used |
 
-Long envelope times are limited by the fixed-point rate resolution: at this sample rate, the smallest non-zero decrement is one count per sample, or about 2.8 seconds for a full-scale traversal. The long PAD/PNO/VLN timings therefore use approximately 2 seconds where necessary.
+Each voice keeps a fractional envelope-step remainder, preserving millisecond-scale timing even when a per-sample level change is smaller than one fixed-point count.
 
 Drum voices with zero sustain become idle automatically when their decay reaches zero, so their release stage is normally not reached.
 
