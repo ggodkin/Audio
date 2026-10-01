@@ -165,7 +165,7 @@ static constexpr int32_t env_rate_from_ms(uint32_t ms, int32_t range = ENV_ONE)
  * PAD – ~1 s attack, full sustain, ~2 s release
  * BRS – ~150 ms attack, ~500 ms decay toward 50%, ~1 s release
  * PNO – fast attack, ~2 s decay to silence, ~1 s release
- * SAX – ~40 ms attack, ~300 ms decay toward 90%, ~700 ms release
+ * SAX – ~50 ms attack, ~250 ms decay toward 85%, ~450 ms release
  * VLN – ~100 ms attack, ~500 ms decay toward 80%, ~1.2 s release
  * DRM – instant attack, ~150 ms decay, no audible release
  */
@@ -175,8 +175,8 @@ static const Adsr PRESETS[NUM_PRESETS] = {
     { env_rate_from_ms(1000), env_rate_from_ms(0),   ENV_ONE,             env_rate_from_ms(2000) }, // PAD
     { env_rate_from_ms(150),  env_rate_from_ms(500), ENV_ONE / 2,         env_rate_from_ms(1000) }, // BRS
     { env_rate_from_ms(5),    env_rate_from_ms(2000), 0,                  env_rate_from_ms(250) }, // PNO
-    { env_rate_from_ms(40),   env_rate_from_ms(300, ENV_ONE / 10), ENV_ONE * 9 / 10, env_rate_from_ms(700, ENV_ONE * 9 / 10) }, // SAX
-    { env_rate_from_ms(100),  env_rate_from_ms(500, ENV_ONE / 5),  ENV_ONE * 4 / 5,  env_rate_from_ms(1200, ENV_ONE * 4 / 5) }, // VLN
+    { env_rate_from_ms(50),   env_rate_from_ms(250, ENV_ONE * 15 / 100), ENV_ONE * 85 / 100, env_rate_from_ms(450, ENV_ONE * 85 / 100) }, // SAX
+        { env_rate_from_ms(150),  env_rate_from_ms(700, ENV_ONE / 4),  ENV_ONE * 3 / 4,  env_rate_from_ms(1400, ENV_ONE * 3 / 4) }, // VLN
     { env_rate_from_ms(1),    env_rate_from_ms(150), 0,                  env_rate_from_ms(300) }, // DRM
 };
 
@@ -270,6 +270,14 @@ static constexpr uint32_t ORGAN_TREMOLO_HZ = 7;
 static constexpr uint32_t ORGAN_TREMOLO_INC =
     (uint32_t)(((uint64_t)ORGAN_TREMOLO_HZ << 32) / SAMPLE_RATE_HZ);
 static uint32_t organ_tremolo_phase = 0;
+static constexpr uint32_t SAX_VIBRATO_HZ = 5;
+static constexpr uint32_t SAX_VIBRATO_INC =
+    (uint32_t)(((uint64_t)SAX_VIBRATO_HZ << 32) / SAMPLE_RATE_HZ);
+static uint32_t sax_vibrato_phase = 0;
+static constexpr uint32_t VLN_VIBRATO_HZ = 6;
+static constexpr uint32_t VLN_VIBRATO_INC =
+    (uint32_t)(((uint64_t)VLN_VIBRATO_HZ << 32) / SAMPLE_RATE_HZ);
+static uint32_t vln_vibrato_phase = 0;
 
 static void instrument_tables_init()
 {
@@ -280,17 +288,23 @@ static void instrument_tables_init()
         // spectrum, but the integer harmonics are also precomputed so the
         // real-time audio path does not perform 64-bit multiplies/divides.
         double sax = sin(a)
-                  + 0.55 * sin(3.0 * a)
-                  + 0.30 * sin(5.0 * a)
-                  + 0.18 * sin(7.0 * a)
-                  + 0.10 * sin(2.0 * a);
+              + 0.18 * sin(2.0 * a)
+              + 0.65 * sin(3.0 * a)
+              + 0.12 * sin(4.0 * a)
+              + 0.42 * sin(5.0 * a)
+              + 0.10 * sin(6.0 * a)
+              + 0.25 * sin(7.0 * a)
+              + 0.08 * sin(8.0 * a)
+              + 0.14 * sin(9.0 * a);
 
         double vln = sin(a)
-                  + 0.70 * sin(2.0 * a)
-                  + 0.50 * sin(3.0 * a)
-                  + 0.35 * sin(4.0 * a)
-                  + 0.25 * sin(5.0 * a)
-                  + 0.15 * sin(6.0 * a);
+                  + 0.85 * sin(2.0 * a)
+                  + 0.65 * sin(3.0 * a)
+                  + 0.50 * sin(4.0 * a)
+                  + 0.40 * sin(5.0 * a)
+                  + 0.30 * sin(6.0 * a)
+                  + 0.22 * sin(7.0 * a)
+                  + 0.15 * sin(8.0 * a);
 
         // Hammond-style drawbars relative to the played note:
         // 8' = 1x, 4' = 2x, 2 2/3' = 3x, 2' = 4x,
@@ -304,8 +318,8 @@ static void instrument_tables_init()
                      + sin(5.0 * a) * 38.0
                      + sin(6.0 * a) * 26.0;
 
-        sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.13);
-        vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 2.95);
+        sax_table[i] = (int32_t)(sax * (double)SINE_PEAK / 2.94);
+        vln_table[i] = (int32_t)(vln * (double)SINE_PEAK / 4.07);
         organ_harmonic_table[i] = (int32_t)(organ * (double)SINE_PEAK / 744.0);
 
         // These are weighted one-cycle sine tables. The phase conversion is
@@ -508,6 +522,10 @@ static int32_t synth_next_sample()
     if (preset_idx == 0) {
         organ_lfo_phase += ORGAN_LFO_INC;
         organ_tremolo_phase += ORGAN_TREMOLO_INC;
+    } else if (preset_idx == PRESET_SAX) {
+        sax_vibrato_phase += SAX_VIBRATO_INC;
+    } else if (preset_idx == PRESET_VLN) {
+        vln_vibrato_phase += VLN_VIBRATO_INC;
     }
 
     for (int i = 0; i < NUM_VOICES; i++) {
@@ -643,8 +661,15 @@ static int32_t synth_next_sample()
                         v->click_level = 0;
                 }
             } else if (preset_idx == PRESET_SAX) {
+                const int32_t vibrato = sine_lookup_fast(
+                    sax_vibrato_phase + v->age * 0x9E3779B9u);
+                voice_phase += (uint32_t)((vibrato >> 8) * 200);
                 raw = instrument_lookup(sax_table, voice_phase);
+                raw += next_noise() >> 4;
             } else if (preset_idx == PRESET_VLN) {
+                const int32_t vibrato = sine_lookup_fast(
+                    vln_vibrato_phase + v->age * 0x9E3779B9u);
+                voice_phase += (uint32_t)((vibrato >> 8) * 400);
                 raw = instrument_lookup(vln_table, voice_phase);
             } else {
                 raw = sine_lookup_fast(voice_phase);

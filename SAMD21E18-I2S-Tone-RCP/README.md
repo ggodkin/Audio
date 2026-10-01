@@ -48,8 +48,8 @@ The current presets are:
 | PAD | 1 s | immediate | 100% | ~2 s |
 | BRS | 150 ms | 500 ms → 50% | 50% | 1 s |
 | PNO | 5 ms | ~2 s → 0% | 0% | 250 ms if released before decay completes |
-| SAX | 40 ms | 300 ms → 90% | 90% | 700 ms |
-| VLN | 100 ms | 500 ms → 80% | 80% | 1.2 s |
+| SAX | 50 ms | 250 ms → 85% | 85% | 450 ms |
+| VLN | 150 ms | 700 ms → 75% | 75% | 1.4 s |
 | DRM | 1 ms | 150 ms → 0% | 0% | not normally used |
 
 Each voice keeps a fractional envelope-step remainder, preserving millisecond-scale timing even when a per-sample level change is smaller than one fixed-point count.
@@ -81,7 +81,10 @@ the full organ, saxophone, violin, and drum synthesis paths by default.
 
 ADSR rates are specified in milliseconds and converted using the configured
 sample rate. The organ uses drawbar-style harmonics, vibrato, tremolo, and a
-short key-click transient; SAX and VLN use separate harmonic waveforms.
+short key-click transient. SAX uses a nasal, odd-harmonic reed spectrum, a
+low-level breath component, and subtle 5 Hz vibrato. VLN uses a brighter
+eight-partial bowed waveform, deeper 6 Hz vibrato, and a slower bow-shaped
+envelope.
 
 ### Key handling
 
